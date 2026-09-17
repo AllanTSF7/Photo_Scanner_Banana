@@ -1,0 +1,31 @@
+# Copy to config.toml (or point BANANA_CONFIG at it).
+# Paths are as seen by the banana containers on the Ubuntu server.
+
+[paths]
+inbox = "/mnt/photo_vault/inbox"     # FF-680W software saves here (SMB from the Windows PC)
+archive = "/mnt/photo_vault/archive" # untouched originals, per batch
+sorted = "/mnt/photo_vault/sorted"   # Immich external library root
+data_dir = "/srv/banana"             # SQLite, thumbnails, model cache (local SSD)
+
+[pairing]
+# FastFoto/ScanSmart default: name_0001.jpg (original), name_0001_a.jpg (enhanced), name_0001_b.jpg (back)
+pattern = '^(?P<base>.+_\d{4})(?P<suffix>_a|_b)?\.(?:jpe?g|tiff?)$'
+front_variant = "original"           # "original" | "enhanced"
+
+[dates]
+# Two-digit years <= pivot map to 20xx, above to 19xx. Omit to use the current year.
+# two_digit_year_pivot = 26
+
+[scanner]
+host = "192.168.16.178"   # Epson FF-680W on the LAN (status indicator only; scans still arrive via the inbox)
+port = 1865
+
+[exiftool]
+path = "exiftool"
+
+[immich]
+url = "http://immich.local:2283"
+api_key = ""
+library_id = ""
+# Path of `paths.sorted` inside the Immich container (NOT the /volume1/... NAS path).
+import_path_prefix = "/mnt/photo_vault/sorted"

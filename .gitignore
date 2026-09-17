@@ -1,0 +1,17 @@
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+build/
+dist/
+*.egg-info/
+native/build/
+.tools/
+config.toml
+data/
+*.db
+*.db-wal
+*.db-shm
+# Playwright CLI workspace and page snapshots
+.playwright/
+.playwright-cli/

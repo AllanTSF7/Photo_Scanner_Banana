@@ -1,0 +1,1 @@
+﻿Source: driver.js v1.8.0 (https://github.com/kamranahmedse/driver.js), MIT (LICENSE). Files: dist/driver.js.iife.js -> driver.js, dist/driver.css. Vendored 2026-09-16; never loaded from a CDN. Popover colors/fonts are overridden with theme.css tokens in app.css.

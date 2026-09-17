@@ -1,0 +1,46 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "photo-scanner-banana"
+version = "0.1.0"
+description = "Offline photo scan triage pipeline that exports EXIF/XMP metadata for Immich"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "sqlmodel>=0.0.22",
+    "pydantic>=2.8",
+    "typer>=0.12",
+    "pyexiftool>=0.5.6",
+    "numpy>=2.0",
+    "pillow>=10.4",
+    "httpx>=0.27",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.3"]
+# Offline OCR for printed text on photo backs (PP-OCR via ONNX Runtime)
+ocr = ["rapidocr_onnxruntime>=1.4"]
+# Offline named-entity recognition for People/Places/Events (spaCy small English model, ~12 MB)
+ner = [
+    "spacy>=3.8",
+    "en_core_web_sm @ https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl",
+]
+# Live UI component tests (tests/ui). Also run: python -m playwright install --with-deps chromium
+ui = ["playwright>=1.47"]
+# Installed separately from ./native (needs a C++ toolchain; built in the Linux image).
+native = ["banana-core"]
+
+[project.scripts]
+banana = "banana.main:cli"
+
+[tool.hatch.metadata]
+allow-direct-references = true  # the spaCy model wheel in the "ner" extra
+
+[tool.hatch.build.targets.wheel]
+packages = ["banana"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

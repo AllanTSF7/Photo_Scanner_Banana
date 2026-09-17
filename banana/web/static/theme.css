@@ -1,0 +1,110 @@
+/* Photo Scanner — Darkroom. Single source of truth for all visual values.
+   Rules and semantics: CLAUDE.md > UI DESIGN SYSTEM. */
+
+@font-face {
+  font-family: "Plex Sans";
+  src: url("fonts/IBMPlexSans-Regular-latin.woff2") format("woff2");
+  font-weight: 400; font-display: swap;
+}
+@font-face {
+  font-family: "Plex Sans";
+  src: url("fonts/IBMPlexSans-SemiBold-latin.woff2") format("woff2");
+  font-weight: 600; font-display: swap;
+}
+@font-face {
+  font-family: "Plex Mono";
+  src: url("fonts/IBMPlexMono-Regular-latin.woff2") format("woff2");
+  font-weight: 400; font-display: swap;
+}
+
+:root {
+  /* Surfaces — true neutral (R=G=B). Never tint. */
+  --surface-sunken:   #0E0E0E;
+  --surface-canvas:   #141414;
+  --surface-raised:   #1E1E1E;
+  --surface-overlay:  #282828;
+
+  /* The only background permitted behind image content. ~18% gray. */
+  --image-well:       #2B2B2B;
+
+  --border-subtle:    #2E2E2E;
+  --border-strong:    #454545;
+
+  --text-primary:     #EDEDED;  /* 15.2:1 on raised */
+  --text-secondary:   #A8A8A8;  /*  6.9:1 on raised */
+  --text-muted:       #6E6E6E;  /*  3.2:1 — disabled/decorative ONLY */
+
+  /* Violet accent. Interactive meaning only. 5.0:1 on raised; --on-accent text on it 5.5:1. */
+  --accent:           #8B7CF6;
+  --accent-hover:     #A597FF;
+  --accent-dim:       rgba(139, 124, 246, 0.16);
+  --on-accent:        #141414;
+  /* Blue focus ring: keyboard focus on interactive elements. 5.9:1 on raised. */
+  --focus-ring:       #5B9BF0;
+
+  /* Status: three values. Warnings use text + shape, not a fourth color. */
+  --status-ok:        #4E9A6A;
+  --status-fail:      #C4544C;
+  --status-idle:      #6E6E6E;
+
+  --font-ui:    "Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono:  "Plex Mono", ui-monospace, "Cascadia Mono", monospace;
+  --text-base:  1rem;      /* 16px floor — never smaller for body or inputs */
+  --text-sm:    0.875rem;  /* labels and metadata only */
+  --text-lg:    1.25rem;
+
+  --space-1: 0.25rem; --space-2: 0.5rem;  --space-3: 0.75rem;
+  --space-4: 1rem;    --space-5: 1.5rem;  --space-6: 2.5rem;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-chip: 999px;
+
+  --dur-fast:   120ms;
+  --dur-base:   200ms;
+  --dur-reveal: 320ms;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
+}
+
+/* Added for the review UI components (see summary). Same rules as above: neutral surfaces, violet/blue = interactive only. */
+:root {
+  --scrim:            rgba(0, 0, 0, 0.62);   /* neutral backdrop behind dialogs / badges over images */
+  --control-h:        2.75rem;               /* 44px: minimum touch target for primary controls */
+  --control-h-sm:     2.25rem;               /* 36px: secondary controls */
+  --thumb-w:          4.5rem;                /* queue thumbnail */
+  --thumb-h:          3.375rem;
+  --frame-h:          42vh;                  /* review image well height; skeleton reserves the same */
+  --frame-h-narrow:   34vh;
+  --queue-w:          19rem;
+  --line-row-h:       2.75rem;               /* one "Text on back" row; skeleton rows use the same */
+  --border-w:         1px;
+  --focus-neutral:    var(--text-primary);   /* focus ring within --space-5 of image content */
+}
+
+@media (prefers-reduced-motion: reduce) {
+  :root { --dur-fast: 0ms; --dur-base: 0ms; --dur-reveal: 0ms; }
+}
+
+body {
+  background: var(--surface-canvas);
+  color: var(--text-primary);
+  font: var(--text-base)/1.5 var(--font-ui);
+  margin: 0;
+}
+
+:where(code, kbd, .mono, [data-mono]) {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
+
+:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Provisional: anything the app suggested but the operator has not committed. */
+[data-state="suggested"] {
+  border: 1px dashed var(--border-strong);
+  color: var(--text-secondary);
+  background: transparent;
+}

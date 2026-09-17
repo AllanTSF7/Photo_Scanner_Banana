@@ -1,0 +1,46 @@
+# Ubuntu server deployment.  docker compose -f docker/compose.yaml up -d
+# Expects the Synology share NFS-mounted at /mnt/photo_vault on the host.
+
+x-banana: &banana
+  build:
+    context: ..
+    dockerfile: docker/Dockerfile
+  image: photo-scanner-banana:latest
+  restart: unless-stopped
+  volumes:
+    - /mnt/photo_vault:/mnt/photo_vault
+    - /srv/banana:/srv/banana
+    - ./config.toml:/etc/banana/config.toml:ro
+
+services:
+  banana-api:
+    <<: *banana
+    command: ["banana", "serve", "--port", "8000"]
+    ports:
+      - "8000:8000"
+
+  banana-worker:
+    <<: *banana
+    command: ["banana", "worker"]
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+
+  # Optional VLM fallback for low-confidence backs: docker compose --profile vlm up -d
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["vlm"]
+    restart: unless-stopped
+    volumes:
+      - /srv/banana/ollama:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]

@@ -1,0 +1,2 @@
+Source: https://github.com/vercel-labs/agent-skills skills/web-design-guidelines (commit 063bee94c3f4df8453406c830b0a7df0f2860278) and https://github.com/vercel-labs/web-interface-guidelines command.md (commit e3d624baaf29dc1fc645aff3e38f03e564d2d6b1), MIT (LICENSE).
+Installed 2026-09-15. Change from upstream: SKILL.md reads the pinned local references/command.md instead of fetching the latest rules at runtime, plus a Project notes section.

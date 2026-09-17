@@ -1,0 +1,3 @@
+Source: https://github.com/alexanderop/walkthrough (commit 5e70c0621a3a1a18c75666ad201855e16b047d05, author Alexander Opalic)
+Installed 2026-09-14 by copying skills/walkthrough/. Generated walkthrough-*.html files load React/Tailwind/Mermaid/Shiki from CDNs:
+they are developer docs in the project root and must never be copied into banana/web/static (offline UI rule).

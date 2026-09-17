@@ -1,0 +1,3 @@
+Source: https://github.com/Leonxlnx/taste-skill skills/redesign-skill/SKILL.md (commit ccbc15639c97057cbfcf32ecebc38ef716e4bb37), MIT License (LICENSE).
+Installed 2026-09-15 with a PROJECT PRECEDENCE block after the frontmatter: CLAUDE.md UI DESIGN SYSTEM overrides upstream aesthetic defaults.
+Only the redesign variant is vendored here; the main taste-skill and other variants conflict with this project (npm/CDNs/new visual languages).

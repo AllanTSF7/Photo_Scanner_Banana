@@ -1,0 +1,423 @@
+<!doctype html>
+<html lang="en" style="color-scheme: dark">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Walkthrough: Photo Scanner overview</title>
+  <!-- Developer documentation generated with the walkthrough skill. Loads libraries from CDNs (needs internet).
+       Never copy into banana/web/static: the review app itself must work offline. -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: { extend: { colors: {
+        wt: {
+          bg: '#000000', surface: '#0a0a0a', raised: '#141414',
+          border: '#2a2a2a', fg: '#ffffff', muted: '#a0a0a0',
+          accent: '#a855f7', file: '#c084fc', red: '#ef4444',
+        },
+        node: {
+          component: '#a855f7', composable: '#7c3aed', utility: '#6d28d9',
+          external: '#525252', event: '#d8b4fe', data: '#9333ea',
+        },
+      }}},
+    };
+  </script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <style>
+    .mermaid-wrap svg { max-width: none !important; height: auto !important; }
+    .mermaid-wrap .node { cursor: pointer; }
+    .mermaid-wrap .node:hover rect,
+    .mermaid-wrap .node:hover polygon,
+    .mermaid-wrap .node:hover circle,
+    .mermaid-wrap .node:hover .label-container { filter: brightness(1.3); transition: filter .15s; }
+    .dt-body p { color:#a0a0a0; font-size:.88rem; line-height:1.65; margin-bottom:10px; }
+    .dt-body .shiki, .dt-body pre.code-fallback {
+      background: #000000; border: 1px solid #2a2a2a; border-radius: 8px;
+      padding: 14px 16px; overflow-x: auto; margin: 8px 0 14px;
+    }
+    .dt-body .shiki { background: #000000 !important; }
+    .dt-body .shiki code, .dt-body pre.code-fallback code {
+      font-family: 'SF Mono','Fira Code',monospace; font-size: .78rem; line-height: 1.55;
+      background: none; padding: 0; border-radius: 0;
+    }
+    .dt-body .shiki code { color: inherit; }
+    .dt-body pre.code-fallback code { color: #e0e0e0; }
+  </style>
+</head>
+<body class="bg-wt-bg text-wt-fg">
+  <div id="root"></div>
+  <script type="module">
+    // 1. Shiki
+    import { createHighlighter } from 'https://cdn.jsdelivr.net/npm/shiki@3.22.0/+esm';
+
+    // 2. React globals
+    const { useState, useEffect, useRef, useCallback } = React;
+    const h = React.createElement;
+
+    // 3. Summary
+    const SUMMARY = "Photo Scanner turns stacks of family prints into dated, tagged photos in Immich without any cloud service. The FF-680W is driven over SANE, each scan is cropped, its back is read by offline OCR, and names and dates are suggested; an operator reviews and approves in a local web app, and every approval teaches the app through append-only correction events. Approved scans are exported as EXIF + XMP files into the folder Immich reads.";
+
+    // 4. Diagram
+    const DIAGRAM = `graph LR
+      subgraph capture["Getting Photos In"]
+        scanner["Scanner (SANE)"]
+        ingest["Ingest & Pairing"]
+      end
+      subgraph understand["Understanding Each Scan"]
+        cropDetection["Photo Crop Detection"]
+        textReading["Reading the Back"]
+        namesAndDates["Names & Dates"]
+      end
+      subgraph review["Human Review & Learning"]
+        scanDatabase[("Scan Database")]
+        reviewUi["Review Web App"]
+        correctionCapture["Correction Capture"]
+        learnedFixes["Learned Fixes & Proposals"]
+      end
+      subgraph output["Into the Library"]
+        exporter["Metadata Export"]
+        immichLibrary["Immich Library"]
+      end
+
+      scanner ==>|"drops front/back pages"| ingest
+      ingest -->|"asks where the photo is"| cropDetection
+      cropDetection -->|"cropped back feeds"| textReading
+      textReading -->|"description feeds"| namesAndDates
+      ingest -->|"stores scans in"| scanDatabase
+      namesAndDates -.->|"suggestions saved to"| scanDatabase
+      reviewUi -->|"reads and edits"| scanDatabase
+      reviewUi ==>|"approval triggers"| correctionCapture
+      correctionCapture -->|"events feed"| learnedFixes
+      learnedFixes -.->|"auto-fixes new text in"| textReading
+      reviewUi -->|"sends approved scans to"| exporter
+      exporter ==>|"writes JPEG + XMP for"| immichLibrary
+
+      click scanner nodeClickHandler "View details"
+      click ingest nodeClickHandler "View details"
+      click cropDetection nodeClickHandler "View details"
+      click textReading nodeClickHandler "View details"
+      click namesAndDates nodeClickHandler "View details"
+      click scanDatabase nodeClickHandler "View details"
+      click reviewUi nodeClickHandler "View details"
+      click correctionCapture nodeClickHandler "View details"
+      click learnedFixes nodeClickHandler "View details"
+      click exporter nodeClickHandler "View details"
+      click immichLibrary nodeClickHandler "View details"
+
+      classDef component fill:#a855f7,stroke:#c084fc,color:#fff
+      classDef composable fill:#7c3aed,stroke:#a78bfa,color:#fff
+      classDef utility fill:#6d28d9,stroke:#8b5cf6,color:#fff
+      classDef external fill:#525252,stroke:#737373,color:#fff
+      classDef event fill:#d8b4fe,stroke:#e9d5ff,color:#000
+      classDef data fill:#9333ea,stroke:#a855f7,color:#fff
+      class scanner event
+      class ingest,textReading,namesAndDates,correctionCapture,exporter composable
+      class cropDetection,learnedFixes utility
+      class reviewUi component
+      class scanDatabase data
+      class immichLibrary external
+    `;
+
+    // 5. Nodes (snippets copied from the files listed)
+    const NODES = {
+      scanner: {
+        title: "Scanner (SANE)",
+        description: "Drives the Epson FF-680W directly over the network with SANE's epsonds backend and saves each duplex pair into the inbox. The scanner delivers the back of each photo first, so the pair is swapped before naming.",
+        files: ["banana/scanner/sane.py:36", "banana/scanner/sane.py:69-70"],
+        code: "        if duplex and first_side == \"back\" and len(pair) == 2:\n            pair = [pair[1], pair[0]]",
+        lang: "python",
+      },
+      ingest: {
+        title: "Ingest & Pairing",
+        description: "Pairs scanner files into front/back groups, moves the originals into the archive untouched, and runs the per-scan analysis. It is the entry point for both direct scans and files dropped into the inbox.",
+        files: ["banana/ingest/service.py:40-43", "banana/ingest/pairing.py"],
+        code: "    paired = pair_files(files, settings.pairing.pattern)",
+        lang: "python",
+      },
+      cropDetection: {
+        title: "Photo Crop Detection",
+        description: "SANE returns the whole 8.5 x 15.5 inch page, so the app finds the print against the scanner's blue-gray backing itself. The hot loop is C++ with a bit-identical NumPy reference.",
+        files: ["banana/imaging.py:29-35", "native/src/photo_bbox.cpp:34", "banana/core/reference.py:83"],
+        code: "    box = core.photo_bbox(np.asarray(small))",
+        lang: "python",
+      },
+      textReading: {
+        title: "Reading the Back",
+        description: "Offline PP-OCR (RapidOCR) reads printed labels on the cropped, rotated back. Lines pass through the learned correction dictionary before they are shown.",
+        files: ["banana/ingest/service.py:175-187", "banana/analysis/ocr/__init__.py:32-43"],
+        code: "    lines = reader.read(image)",
+        lang: "python",
+      },
+      namesAndDates: {
+        title: "Names & Dates",
+        description: "Turns the back's text into a date with an explicit precision and into People, Places and Events using spaCy plus photo-caption rules. Results only fill empty fields and are stored as suggestions.",
+        files: ["banana/ingest/service.py:208-212", "banana/analysis/date_parse.py", "banana/analysis/entities.py:96"],
+        code: "    if scan.date_precision == \"unknown\":\n        text = \" \\n \".join(line.text for line in lines if line.score >= 0.5)",
+        lang: "python",
+      },
+      scanDatabase: {
+        title: "Scan Database",
+        description: "SQLite holds scans, batches, exports and correction events. Every scan keeps what the app suggested next to what the operator committed, which is what makes learning possible.",
+        files: ["banana/models.py:50", "banana/db.py:35-36"],
+        code: "    suggestions: dict = Field(default_factory=dict, sa_column=Column(JSON))",
+        lang: "python",
+      },
+      reviewUi: {
+        title: "Review Web App",
+        description: "A plain HTML/CSS/JS app served by FastAPI where the operator fixes crops, rotation, text, dates and names, then approves or rejects. Suggested values stay visibly provisional until committed.",
+        files: ["banana/web/static/app.js:522", "banana/web/api.py:198-228", "banana/web/static/theme.css"],
+        code: "  const scan = await api(\"PATCH\", `/api/scans/${state.selectedId}`, formBody(extra));",
+        lang: "javascript",
+      },
+      correctionCapture: {
+        title: "Correction Capture",
+        description: "On approval, compares each suggestion with the committed value and appends kept, edited, removed or added events with the producer that made the suggestion. The database refuses updates and deletes to these rows.",
+        files: ["banana/core/corrections.py:197-200", "banana/web/api.py:228"],
+        code: "    events = build_events(scan, settings, approval_id)",
+        lang: "python",
+      },
+      learnedFixes: {
+        title: "Learned Fixes & Proposals",
+        description: "Builds a correction dictionary from approved scans only and proposes blank-back and duplicate thresholds. Proposals change nothing until the operator applies them.",
+        files: ["banana/core/dictionary.py:78-86", "banana/core/proposals.py:33-49"],
+        code: "            dictionary.lines[normalize(raw)] = event.approved\n            dictionary.words.update(_word_fixes(raw, event.approved))",
+        lang: "python",
+      },
+      exporter: {
+        title: "Metadata Export",
+        description: "Renders the approved crop and rotation, writes dates and hierarchical tags with ExifTool, verifies them by reading back, then moves the sidecar and image into the dated folder. Originals in the archive are never touched.",
+        files: ["banana/export/exporter.py:54-99", "banana/export/exiftool_writer.py:72-73"],
+        code: "        os.replace(staged.with_name(layout.sidecar_name(staged.name)), dest.with_name(layout.sidecar_name(dest.name)))\n        os.replace(staged, dest)",
+        lang: "python",
+      },
+      immichLibrary: {
+        title: "Immich Library",
+        description: "Immich mounts the export folder read-only as an External Library and reads the EXIF dates, descriptions and XMP tags. Stacking fronts with backs through the Immich API is still planned.",
+        files: ["banana/export/layout.py:11", "config.example.toml"],
+        code: "STAGING_DIR = \".staging\"  # add `**/.staging/**` to the Immich library exclusion patterns",
+        lang: "python",
+      },
+    };
+
+    // 6. Legend
+    const LEGEND = [
+      { label: 'Web app', color: 'bg-node-component' },
+      { label: 'Pipeline service', color: 'bg-node-composable' },
+      { label: 'Algorithm / rules', color: 'bg-node-utility' },
+      { label: 'Data', color: 'bg-node-data' },
+      { label: 'Hardware trigger', color: 'bg-node-event' },
+      { label: 'External system', color: 'bg-node-external' },
+    ];
+
+    // 7. Shiki pre-highlight
+    const langs = [...new Set(Object.values(NODES).map(n => n.lang).filter(Boolean))];
+    if (langs.length === 0) langs.push('typescript');
+    let highlighter = null;
+    try { highlighter = await createHighlighter({ themes: ['vitesse-dark'], langs }); }
+    catch (e) { console.warn('Shiki failed:', e); }
+    const HIGHLIGHTED = {};
+    for (const [id, node] of Object.entries(NODES)) {
+      if (node.code && highlighter) {
+        try {
+          HIGHLIGHTED[id] = highlighter.codeToHtml(node.code, { lang: node.lang || 'typescript', theme: 'vitesse-dark' });
+        } catch (e) { console.warn(`Highlight failed for ${id}:`, e); }
+      }
+    }
+
+    // 8. Components
+    function usePanZoom() {
+      const viewportRef = useRef(null), canvasRef = useRef(null), zoomDisplayRef = useRef(null);
+      const st = useRef({ zoom: 1, panX: 0, panY: 0 });
+      const drag = useRef({ on: false, lx: 0, ly: 0 });
+
+      const apply = useCallback(() => {
+        const { zoom, panX, panY } = st.current;
+        if (canvasRef.current) canvasRef.current.style.transform = `translate(${panX}px,${panY}px) scale(${zoom})`;
+        if (zoomDisplayRef.current) zoomDisplayRef.current.textContent = Math.round(zoom * 100) + '%';
+      }, []);
+
+      const fitToScreen = useCallback(() => {
+        const svg = canvasRef.current?.querySelector('svg');
+        const vp = viewportRef.current;
+        if (!svg || !vp) return;
+        const s = st.current;
+        const vw = vp.clientWidth, vh = vp.clientHeight;
+        const sw = svg.getBoundingClientRect().width / s.zoom;
+        const sh = svg.getBoundingClientRect().height / s.zoom;
+        const fit = Math.max(0.15, Math.min(2, Math.min((vw - 80) / sw, (vh - 80) / sh)));
+        s.zoom = fit; s.panX = (vw - sw * fit) / 2; s.panY = (vh - sh * fit) / 2;
+        apply();
+      }, [apply]);
+
+      useEffect(() => {
+        const vp = viewportRef.current;
+        if (!vp) return;
+        const onWheel = (e) => {
+          e.preventDefault();
+          const r = vp.getBoundingClientRect();
+          const mx = e.clientX - r.left, my = e.clientY - r.top, s = st.current;
+          const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+          const nz = Math.min(4, Math.max(0.15, s.zoom * f)), sc = nz / s.zoom;
+          s.panX = mx - sc * (mx - s.panX); s.panY = my - sc * (my - s.panY); s.zoom = nz;
+          apply();
+        };
+        const onDown = (e) => {
+          if (e.target.closest('.node')) return;
+          drag.current = { on: true, lx: e.clientX, ly: e.clientY };
+          vp.setPointerCapture(e.pointerId);
+        };
+        const onMove = (e) => {
+          const d = drag.current; if (!d.on) return;
+          st.current.panX += e.clientX - d.lx; st.current.panY += e.clientY - d.ly;
+          d.lx = e.clientX; d.ly = e.clientY; apply();
+        };
+        const onUp = () => { drag.current.on = false; };
+        vp.addEventListener('wheel', onWheel, { passive: false });
+        vp.addEventListener('pointerdown', onDown);
+        vp.addEventListener('pointermove', onMove);
+        vp.addEventListener('pointerup', onUp);
+        vp.addEventListener('pointercancel', onUp);
+        window.addEventListener('resize', fitToScreen);
+        return () => {
+          vp.removeEventListener('wheel', onWheel);
+          vp.removeEventListener('pointerdown', onDown);
+          vp.removeEventListener('pointermove', onMove);
+          vp.removeEventListener('pointerup', onUp);
+          vp.removeEventListener('pointercancel', onUp);
+          window.removeEventListener('resize', fitToScreen);
+        };
+      }, [apply, fitToScreen]);
+
+      const zoomIn = useCallback(() => { st.current.zoom = Math.min(4, st.current.zoom * 1.25); apply(); }, [apply]);
+      const zoomOut = useCallback(() => { st.current.zoom = Math.max(0.15, st.current.zoom / 1.25); apply(); }, [apply]);
+      return { viewportRef, canvasRef, zoomDisplayRef, zoomIn, zoomOut, fitToScreen };
+    }
+
+    function MermaidDiagram({ onNodeClick }) {
+      const ref = useRef(null);
+      useEffect(() => {
+        window.nodeClickHandler = onNodeClick;
+        mermaid.initialize({
+          startOnLoad: false, theme: 'dark', securityLevel: 'loose',
+          themeVariables: {
+            primaryColor: '#0a0a0a', primaryTextColor: '#ffffff', primaryBorderColor: '#2a2a2a',
+            lineColor: '#a0a0a0', background: '#000000',
+            secondaryColor: '#000000', tertiaryColor: '#000000',
+            mainBkg: '#0a0a0a', nodeBorder: '#2a2a2a',
+            clusterBkg: 'rgba(10,10,10,0.8)', clusterBorder: '#7c3aed',
+            titleColor: '#ffffff', edgeLabelBackground: 'transparent',
+          },
+          flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis' },
+        });
+        mermaid.render('walkthrough-diagram', DIAGRAM).then(({ svg, bindFunctions }) => {
+          if (ref.current) { ref.current.innerHTML = svg; bindFunctions?.(ref.current); }
+        });
+        return () => { delete window.nodeClickHandler; };
+      }, [onNodeClick]);
+      return h('div', { ref, className: 'mermaid-wrap' });
+    }
+
+    function Summary({ collapsed, onToggle }) {
+      if (collapsed) {
+        return h('div', {
+          onClick: onToggle,
+          className: 'fixed top-16 left-6 z-10 px-3 py-1.5 bg-wt-surface/60 backdrop-blur border border-wt-border rounded-full shadow-lg cursor-pointer hover:bg-wt-surface/80 transition-all duration-300',
+        }, h('span', { className: 'text-xs text-wt-muted font-medium' }, 'Summary'));
+      }
+      return h('div', {
+        onClick: onToggle,
+        className: 'fixed top-16 left-6 z-10 max-w-lg px-4 py-3 bg-wt-surface/80 backdrop-blur border border-wt-border rounded-lg shadow-lg cursor-pointer transition-all duration-300',
+      },
+        h('p', { className: 'text-sm text-wt-muted leading-relaxed' }, SUMMARY),
+        h('p', { className: 'text-[0.65rem] text-wt-muted/50 mt-1.5' }, 'Click to dismiss'),
+      );
+    }
+
+    function DetailPanel({ nodeId, node, onClose }) {
+      useEffect(() => {
+        const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+        document.addEventListener('keydown', onKey);
+        return () => document.removeEventListener('keydown', onKey);
+      }, [onClose]);
+      const codeHtml = HIGHLIGHTED[nodeId];
+      return h('div', { className: 'fixed top-4 right-4 bottom-4 w-[560px] max-w-[calc(100vw-2rem)] z-30 bg-wt-surface border border-wt-border rounded-xl shadow-2xl flex flex-col overflow-hidden' },
+        h('button', {
+          onClick: onClose, 'aria-label': 'Close',
+          className: 'absolute top-3 right-3 z-10 w-7 h-7 rounded-md border border-wt-border bg-wt-raised text-wt-muted flex items-center justify-center text-lg hover:bg-wt-red hover:border-wt-red hover:text-white transition-colors',
+        }, '×'),
+        h('div', { className: 'flex-1 overflow-y-auto p-5' },
+          h('h2', { className: 'text-lg font-bold text-wt-fg mb-3 pr-9' }, node.title),
+          h('div', { className: 'dt-body' }, h('p', null, node.description)),
+          node.code && h('div', { className: 'dt-body' },
+            codeHtml
+              ? h('div', { dangerouslySetInnerHTML: { __html: codeHtml } })
+              : h('pre', { className: 'code-fallback' }, h('code', null, node.code)),
+          ),
+          node.files?.length > 0 && h('div', { className: 'mt-4 pt-3 border-t border-wt-border' },
+            h('div', { className: 'text-[0.7rem] uppercase tracking-wider text-wt-muted font-semibold mb-1.5' }, 'Files'),
+            h('code', { className: 'text-sm text-wt-file font-mono leading-relaxed' },
+              node.files.map((f, i) => h('span', { key: i }, f, h('br'))),
+            ),
+          ),
+        ),
+      );
+    }
+
+    function ZoomControls({ zoomDisplayRef, onZoomIn, onZoomOut, onFit }) {
+      const btn = 'w-8 h-8 rounded-md border border-wt-border bg-wt-raised text-wt-fg hover:border-wt-accent transition-colors';
+      return h('div', { className: 'fixed bottom-5 left-5 z-20 flex items-center gap-2 px-2 py-2 bg-wt-surface border border-wt-border rounded-lg shadow-xl' },
+        h('button', { className: btn, onClick: onZoomOut, 'aria-label': 'Zoom out' }, '−'),
+        h('span', { ref: zoomDisplayRef, className: 'text-xs text-wt-muted w-12 text-center' }, '100%'),
+        h('button', { className: btn, onClick: onZoomIn, 'aria-label': 'Zoom in' }, '+'),
+        h('button', { className: 'px-3 h-8 rounded-md border border-wt-border bg-wt-raised text-xs text-wt-fg hover:border-wt-accent transition-colors', onClick: onFit }, 'Fit'),
+      );
+    }
+
+    function App() {
+      const [activeId, setActiveId] = useState(null);
+      const [summaryCollapsed, setSummaryCollapsed] = useState(true);
+      const pz = usePanZoom();
+
+      const setActiveNode = useCallback((nodeId) => {
+        setActiveId(nodeId);
+        document.querySelectorAll('.mermaid-wrap .node').forEach(n => { n.style.opacity = nodeId ? '0.4' : '1'; });
+        if (nodeId) {
+          const el = document.querySelector(`.mermaid-wrap .node[id*="${nodeId}"]`);
+          if (el) el.style.opacity = '1';
+        }
+      }, []);
+      const closeDetail = useCallback(() => {
+        setActiveId(null);
+        document.querySelectorAll('.mermaid-wrap .node').forEach(n => { n.style.opacity = '1'; });
+      }, []);
+      useEffect(() => { setTimeout(pz.fitToScreen, 600); }, [pz.fitToScreen]);
+
+      return h(React.Fragment, null,
+        h('header', { className: 'fixed top-0 inset-x-0 z-10 px-6 py-3.5 bg-gradient-to-b from-wt-bg to-transparent pointer-events-none' },
+          h('h1', { className: 'text-base font-semibold text-wt-fg' }, 'Photo Scanner: how it works'),
+          h('p', { className: 'text-sm text-wt-muted mt-0.5' }, 'From the FF-680W scanner through offline analysis, human review and learning, to the Immich library'),
+        ),
+        h(Summary, { collapsed: summaryCollapsed, onToggle: () => setSummaryCollapsed(c => !c) }),
+        h('div', { ref: pz.viewportRef, className: 'w-full h-screen overflow-hidden cursor-grab active:cursor-grabbing' },
+          h('div', { ref: pz.canvasRef, className: 'origin-top-left will-change-transform inline-block p-[80px_60px_60px]' },
+            h(MermaidDiagram, { onNodeClick: setActiveNode }),
+          ),
+        ),
+        h(ZoomControls, { zoomDisplayRef: pz.zoomDisplayRef, onZoomIn: pz.zoomIn, onZoomOut: pz.zoomOut, onFit: pz.fitToScreen }),
+        h('div', { className: 'fixed bottom-5 left-1/2 -translate-x-1/2 z-20 flex flex-wrap justify-center gap-4 px-4 py-2 bg-wt-surface border border-wt-border rounded-lg shadow-xl max-w-[calc(100vw-2rem)]' },
+          LEGEND.map(l => h('span', { key: l.label, className: 'flex items-center gap-1.5 text-xs text-wt-muted' },
+            h('span', { className: `w-2 h-2 rounded-full ${l.color}` }), l.label)),
+        ),
+        activeId && NODES[activeId] && h(DetailPanel, { nodeId: activeId, node: NODES[activeId], onClose: closeDetail }),
+        h('div', { className: 'fixed bottom-5 right-5 z-20 text-xs text-wt-muted opacity-50' },
+          h('kbd', null, 'Scroll'), ' zoom · ', h('kbd', null, 'Drag'), ' pan · Click nodes'),
+      );
+    }
+
+    // 9. Mount
+    ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+  </script>
+</body>
+</html>

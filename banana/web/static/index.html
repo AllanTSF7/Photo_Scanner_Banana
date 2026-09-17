@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Photo Scanner · Review</title>
+  <link rel="preload" href="/static/fonts/IBMPlexSans-Regular-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/static/theme.css">
+  <link rel="stylesheet" href="/static/vendor/driver/driver.css">
+  <link rel="stylesheet" href="/static/app.css">
+  <link rel="icon" href="data:,">
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><strong>Photo Scanner</strong> <span class="muted">review</span></div>
+    <nav class="tabs" id="tabs" aria-label="Scan status"></nav>
+    <div class="actions">
+      <div class="action-group status-group">
+        <button id="btn-health" class="btn ghost health-button" aria-expanded="false" aria-controls="health-panel">
+          <span class="dot"></span><span id="health-text">System</span>
+        </button>
+        <button id="btn-learning" class="btn ghost learning-button" aria-expanded="false" aria-controls="learning-panel">
+          Learning <span id="learning-count" class="count-badge mono">0</span>
+        </button>
+        <span id="scanner-status" class="scanner-status" hidden></span>
+      </div>
+      <div class="action-group scan-group">
+        <label id="scan-count-wrap" class="inline-select" hidden>
+          <span class="muted">Feed</span>
+          <select id="scan-count">
+            <option value="all">Whole stack</option>
+            <option value="one">One photo</option>
+          </select>
+        </label>
+        <label id="scan-destination-wrap" class="inline-select" hidden>
+          <span class="muted">After scan</span>
+          <select id="scan-destination">
+            <option value="review">Add to review queue</option>
+            <option value="inbox">Leave in inbox</option>
+          </select>
+        </label>
+        <button id="btn-scan" class="btn" hidden title="Scan every photo in the feeder">Scan feeder</button>
+      </div>
+      <div class="action-group pipeline-group">
+        <button id="btn-ingest" class="btn">Ingest inbox</button>
+        <button id="btn-export" class="btn irreversible" title="Writes files to the library. Asks for confirmation.">Export approved</button>
+        <button id="btn-guide" class="btn ghost" data-shortcut="g" title="Walk through the review workflow">Guide</button>
+        <a class="btn ghost" href="/docs" target="_blank" rel="noopener">API docs</a>
+      </div>
+    </div>
+  </header>
+
+  <section id="health-panel" class="drawer health-panel" hidden>
+    <div class="card">
+      <div class="panel-head">
+        <h2>System health</h2>
+        <span id="health-checked" class="muted mono"></span>
+        <span class="spacer"></span>
+        <button id="btn-health-recheck" class="btn">Recheck</button>
+        <button id="btn-health-close" class="btn ghost">Close</button>
+      </div>
+      <ul id="health-list" aria-busy="true"></ul>
+    </div>
+  </section>
+
+  <section id="learning-panel" class="drawer learning-panel" hidden>
+    <div class="card panel-head learning-head">
+      <h2>Learning loop</h2>
+      <p class="muted">Every approval records what the app suggested and what you kept, fixed or removed. Nothing leaves this machine, and nothing is applied without you.</p>
+      <span class="spacer"></span>
+      <button id="btn-learning-refresh" class="btn">Refresh</button>
+      <button id="btn-learning-close" class="btn ghost">Close</button>
+    </div>
+    <div class="learning-grid" id="learning-body" aria-busy="true">
+      <article class="card stat-card">
+        <h3>Corrections</h3>
+        <p class="big mono" id="learning-usable">0</p>
+        <p class="muted" id="learning-usable-note">usable events from approved scans</p>
+      </article>
+      <article class="card fields-card">
+        <h3>By field</h3>
+        <ul id="learning-fields" class="field-bars"></ul>
+        <p class="legend muted"><span class="swatch kept"></span>kept <span class="swatch edited"></span>fixed <span class="swatch removed"></span>removed <span class="swatch added"></span>added</p>
+      </article>
+      <article class="card dictionary-card">
+        <h3>Correction dictionary <span id="dictionary-version" class="chip mono"></span></h3>
+        <ul id="dictionary-list" class="dictionary-list"></ul>
+        <p id="dictionary-empty" class="muted">Fix a line in <em>Text on back</em> and approve the scan: the fix is reused on every later scan.</p>
+      </article>
+      <article class="card proposals-card">
+        <h3>Threshold proposals</h3>
+        <ul id="proposal-list" class="proposal-list"></ul>
+      </article>
+      <article class="card producers-card">
+        <h3>Active models and rules</h3>
+        <ul id="producer-list" class="producer-list"></ul>
+      </article>
+      <article class="card stages-card">
+        <h3>Stages</h3>
+        <ol id="stage-list" class="stage-list"></ol>
+      </article>
+    </div>
+  </section>
+
+  <div class="layout">
+    <aside class="queue card" aria-label="Scan queue">
+      <div class="queue-head"><h2>Queue</h2><span id="queue-count" class="muted mono"></span></div>
+      <ul id="scan-list-skeleton" class="queue-list queue-skeleton" aria-hidden="true"></ul>
+      <ul id="scan-list" class="queue-list"></ul>
+      <p id="empty-list" class="empty" hidden>No scans here.<br>Load photos in the scanner and click <em>Scan feeder</em>,<br>or put scan files in the inbox and click <em>Ingest inbox</em>.</p>
+    </aside>
+
+    <main id="detail" class="detail">
+      <div class="placeholder card" id="placeholder">
+        <p class="placeholder-title">Select a scan to review.</p>
+        <p class="muted">Every action has a button; the letters shown on buttons are keyboard shortcuts.</p>
+      </div>
+
+      <section id="editor" hidden>
+        <div class="editor-head card">
+          <div class="editor-title">
+            <h1 id="scan-title"></h1>
+            <span id="scan-status" class="chip status"></span>
+            <span id="scan-dup" class="chip warn" hidden></span>
+            <span id="scan-operator-dup" class="chip warn" hidden>you flagged as duplicate</span>
+          </div>
+          <span class="muted mono scan-batch" id="scan-batch"></span>
+          <div class="editor-tools">
+            <button type="button" class="btn" id="btn-prev" data-shortcut="k">Previous</button>
+            <button type="button" class="btn" id="btn-next" data-shortcut="j">Next</button>
+            <button type="button" class="btn" id="btn-flag-dup" data-shortcut="d" aria-pressed="false">Flag duplicate</button>
+            <button type="button" class="btn" id="btn-swap">Swap front/back</button>
+            <button type="button" class="btn" id="btn-redetect">Re-detect crop</button>
+          </div>
+        </div>
+
+        <div class="images">
+          <figure id="fig-front" class="card">
+            <div class="frame loading" id="frame-front"><img id="img-front" alt="Front of photo"></div>
+            <figcaption>
+              <span class="side-label">Front</span> <span id="front-crop" class="chip"></span>
+              <span class="rotate">
+                <button type="button" class="btn small" data-rotate="front" data-step="-90" data-shortcut="shift+r">Rotate left</button>
+                <button type="button" class="btn small" data-rotate="front" data-step="90" data-shortcut="r">Rotate right</button>
+              </span>
+            </figcaption>
+          </figure>
+          <figure id="fig-back" class="card">
+            <div class="frame loading" id="frame-back"><img id="img-back" alt="Back of photo"></div>
+            <figcaption>
+              <span class="side-label">Back</span> <span id="back-type" class="chip"></span>
+              <span class="rotate">
+                <button type="button" class="btn small" data-rotate="back" data-step="-90">Rotate left</button>
+                <button type="button" class="btn small" data-rotate="back" data-step="90">Rotate right</button>
+              </span>
+              <label class="toggle"><input type="checkbox" id="keep-back" data-shortcut="b"> keep &amp; stack in Immich</label>
+            </figcaption>
+          </figure>
+        </div>
+
+        <section id="ocr-panel" class="ocr-panel card">
+          <div class="panel-head">
+            <h2>Text on back</h2>
+            <span id="ocr-engine" class="muted mono"></span>
+            <span class="spacer"></span>
+            <button type="button" class="btn small" id="btn-read-text" data-shortcut="t">Read text</button>
+          </div>
+          <p id="ocr-empty" class="muted ocr-empty">No text read yet.</p>
+          <ul id="ocr-lines"></ul>
+          <p class="muted ocr-hint" id="ocr-hint" hidden>Dashed values are suggestions until you approve. Click a line to add it to the description. <strong>Fix</strong> a misread line or mark it <strong>Not text</strong>: approved fixes teach the app.</p>
+        </section>
+
+        <form id="form" class="form card" autocomplete="off">
+          <div class="field">
+            <label for="date-text">Date <span class="muted">(as written: “Xmas '84”, “Summer of 1979”, “1960s”)</span></label>
+            <input id="date-text" type="text" placeholder="unknown">
+            <div id="date-preview" class="date-preview"></div>
+            <p class="autocorrect-note" data-for="date" hidden></p>
+          </div>
+
+          <div class="field">
+            <label for="description">Description</label>
+            <textarea id="description" rows="3" placeholder="Text from the back, or your own note"></textarea>
+            <p class="autocorrect-note" data-for="description" hidden></p>
+          </div>
+
+          <p id="derive-hint" class="muted derive-hint" hidden>People, places and events are suggested from the description. Dashed chips are suggestions: they become yours when you edit the field or approve. Click a “+” chip to add it.</p>
+          <div class="grid2">
+            <div class="field"><label>People</label><div class="chips-input" data-field="people"></div></div>
+            <div class="field"><label>Places</label><div class="chips-input" data-field="places"></div></div>
+            <div class="field"><label>Events</label><div class="chips-input" data-field="events"></div></div>
+            <div class="field"><label>Tags <span class="muted">(use / for hierarchy)</span></label><div class="chips-input" data-field="tags"></div></div>
+          </div>
+
+          <div class="form-actions">
+            <button type="button" class="btn danger" id="btn-reject" data-shortcut="x">Reject</button>
+            <span class="spacer"></span>
+            <span id="save-state" class="muted"></span>
+            <button type="submit" class="btn" id="btn-save" data-shortcut="ctrl+s">Save</button>
+            <button type="button" class="btn primary" id="btn-approve" data-shortcut="a">Approve</button>
+          </div>
+
+          <div id="export-info" class="export-info mono" hidden></div>
+        </form>
+      </section>
+    </main>
+  </div>
+
+  <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
+    <form method="dialog" class="card">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-body"></p>
+      <p class="muted confirm-note">This can't be undone from the app.</p>
+      <div class="form-actions">
+        <span class="spacer"></span>
+        <button value="cancel" class="btn" id="confirm-cancel">Cancel</button>
+        <button value="confirm" class="btn irreversible" id="confirm-ok"></button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
+  <script src="/static/vendor/driver/driver.js"></script>
+  <script src="/static/app.js"></script>
+  <script src="/static/tour.js"></script>
+</body>
+</html>
