@@ -260,6 +260,33 @@ def update_scan(scan_id: int, body: ScanUpdate, session: Session = Depends(get_s
     return data
 
 
+@app.delete("/api/scans/{scan_id}", tags=["scans"])
+def delete_scan(scan_id: int, session: Session = Depends(get_session)) -> dict:
+    """Permanently remove a rejected scan's original files and its record. Never reachable during normal
+    review - only for a scan already rejected, with no export and no correction-event (training) history, so
+    this can never discard data the learning loop depends on."""
+    scan = _get_scan(session, scan_id)
+    if scan.status != ScanStatus.REJECTED.value:
+        raise HTTPException(409, "only a rejected scan can be deleted")
+    if session.exec(select(Export).where(Export.scan_id == scan_id)).first():
+        raise HTTPException(409, "this scan was already exported; remove the exported copy separately")
+    if session.exec(select(CorrectionEvent).where(CorrectionEvent.scan_id == scan_id)).first():
+        raise HTTPException(409, "this scan has correction history used for training and can't be deleted")
+
+    removed = []
+    for value in {scan.front_path, scan.back_path, scan.front_enhanced_path}:
+        if not value:
+            continue
+        try:
+            Path(value).unlink()
+            removed.append(Path(value).name)
+        except FileNotFoundError:
+            pass
+    session.delete(scan)
+    session.commit()
+    return {"deleted": scan_id, "files_removed": removed}
+
+
 class OcrLineUpdate(BaseModel):
     text: str | None = None  # operator's corrected text; "" or the shown text clears the correction
     removed: bool | None = None  # True = not text (noise, lab code the operator rejects)

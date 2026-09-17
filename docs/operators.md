@@ -142,6 +142,11 @@ there's enough evidence (for example, when to call a back "blank"). They change 
 **Revert** undoes them.
 
 **Fix the images** (these never change the original scan; they're applied when exporting):
+- **Auto-rotate:** when the back has readable text, the app usually straightens the photo for you - both the front
+  and the back come out upright without you touching Rotate. You'll see an **auto-rotated** chip next to whichever
+  side it adjusted; it's dashed like any other suggestion until you approve the scan. If it guessed wrong (rare -
+  it only rotates when it's confident), fix it with Rotate exactly as before. No back, a blank back, or writing
+  it can't read at all: nothing is guessed, and rotation stays manual for that scan.
 - **Rotate left / Rotate right** under the front or back image. Scans come out in whatever direction the photo was fed,
   so upside-down or sideways photos are normal. <kbd>R</kbd> rotates the front right, <kbd>Shift</kbd>+<kbd>R</kbd> left.
 - **Swap front/back** (top right of the scan) when the picture shows up as the back.
@@ -150,10 +155,17 @@ there's enough evidence (for example, when to call a back "blank"). They change 
 **Then decide:**
 - **Approve** (<kbd>A</kbd>): the photo is ready to export. The next photo opens.
 - **Reject** (<kbd>X</kbd>): the photo won't be exported. Use this for rescans and failed or blurry scans.
-  The original stays in the archive.
+  The original stays in the archive - rejecting never deletes anything.
 - **Save** (<kbd>Ctrl</kbd>+<kbd>S</kbd>): keep your edits and decide later.
 
 Switching photos saves your edits automatically.
+
+**Deleting a rejected photo for good:** open the **Rejected** tab and select it - a **Delete permanently**
+button appears there (nowhere else). It asks you to confirm, then removes the original front/back files from
+the archive and the record itself; there's no undo. It's refused if the photo was ever approved (even briefly)
+or already exported, since that scan may carry corrections the learning loop depends on. Most rejects
+(duplicates, misfeeds, blurry scans) are fine to delete; when in doubt, just leave it rejected - it costs
+nothing to keep.
 
 ### Step 4: Export
 Click **Export approved**. Approved photos move to the **Exported** tab, and the form shows where

@@ -153,7 +153,7 @@ def test_read_text_endpoint(client, monkeypatch):
     class Reader:
         name = "fake"
 
-        def read(self, image):
+        def read(self, image, use_cls: bool = True):
             return [ocr.TextLine("Xmas '84", 0.97, [[0, 0]] * 4), ocr.TextLine("Grandma & John", 0.95, [[0, 0]] * 4)]
 
     monkeypatch.setattr(ocr, "get_reader", lambda: Reader())
@@ -196,6 +196,56 @@ def test_autocorrect_endpoint_fixes_typos_and_protects_known_names(client):
 
     clean = c.post("/api/autocorrect", json={"text": "Christmas 1984"}).json()
     assert clean["text"] == "Christmas 1984" and clean["fixes"] == []
+
+
+def test_delete_scan_only_allowed_for_rejected_with_no_history(client):
+    c, root = client
+    c.post("/api/ingest")
+    scans = {s["source_key"]: s for s in c.get("/api/scans").json()}
+
+    needs_review = scans["Attic3_0002"]["id"]
+    assert c.delete(f"/api/scans/{needs_review}").status_code == 409  # not rejected yet
+
+    c.patch(f"/api/scans/{needs_review}", json={"status": "rejected"})
+    front_path = Path(scans["Attic3_0002"]["front_path"])
+    back_path = Path(scans["Attic3_0002"]["back_path"])
+    assert front_path.exists() and back_path.exists()
+
+    deleted = c.delete(f"/api/scans/{needs_review}").json()
+    assert sorted(deleted["files_removed"]) == sorted([front_path.name, back_path.name])
+    assert not front_path.exists() and not back_path.exists()
+    assert c.get(f"/api/scans/{needs_review}").status_code == 404
+
+
+def test_delete_scan_refuses_when_it_has_training_history(client):
+    c, _ = client
+    c.post("/api/ingest")
+    scans = {s["source_key"]: s for s in c.get("/api/scans").json()}
+    sid = scans["Attic3_0002"]["id"]
+
+    c.patch(f"/api/scans/{sid}", json={"date_text": "1990", "status": "approved"})  # writes correction events
+    c.patch(f"/api/scans/{sid}", json={"status": "rejected"})  # later rejected - events still exist
+    response = c.delete(f"/api/scans/{sid}")
+    assert response.status_code == 409
+    assert "training" in response.json()["detail"]
+
+    front_path = Path(scans["Attic3_0002"]["front_path"])
+    assert front_path.exists()  # refused: nothing touched
+
+
+@pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
+def test_delete_scan_refuses_when_already_exported(client):
+    c, _ = client
+    c.post("/api/ingest")
+    scans = {s["source_key"]: s for s in c.get("/api/scans").json()}
+    sid = scans["Attic3_0001"]["id"]
+
+    c.patch(f"/api/scans/{sid}", json={"date_text": "1990", "status": "approved"})
+    c.post("/api/export")
+    c.patch(f"/api/scans/{sid}", json={"status": "rejected"})
+    response = c.delete(f"/api/scans/{sid}")
+    assert response.status_code == 409
+    assert "exported" in response.json()["detail"]
 
 
 def test_demo_password_protects_everything(client, monkeypatch):

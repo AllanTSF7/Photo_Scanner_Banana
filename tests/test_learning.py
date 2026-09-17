@@ -86,6 +86,33 @@ def test_approval_writes_one_event_per_item(env):
     assert all(e.batch == "batch-1" for e in events)
 
 
+def test_auto_rotation_suggestion_kept_and_overridden(env):
+    settings, engine, back = env
+    producer = corrections.producers(settings)["rotation_auto"]
+    with db.session(engine) as session:
+        kept = make_scan(session, back, 2)
+        corrections.suggest(kept, "rotation_front", 90, producer, confidence=1.8)
+        corrections.suggest(kept, "rotation_back", 90, producer, confidence=1.8)
+        kept.front_rotation = kept.back_rotation = 90  # operator leaves the auto-rotation as-is
+        kept_events = approve(session, kept, settings)
+
+        overridden = make_scan(session, back, 3)
+        corrections.suggest(overridden, "rotation_front", 90, producer, confidence=1.8)
+        corrections.suggest(overridden, "rotation_back", 90, producer, confidence=1.8)
+        overridden.front_rotation = overridden.back_rotation = 90
+        overridden.back_rotation = 180  # operator disagrees with the auto-rotation and fixes just the back
+        overridden_events = approve(session, overridden, settings)
+
+    kept_rotation = {e.asset_ref["side"]: e for e in kept_events if e.field == "rotation"}
+    assert kept_rotation["front"].action == "kept" and kept_rotation["front"].producer == producer
+    assert kept_rotation["back"].action == "kept" and str(kept_rotation["back"].suggested) == "90"
+
+    overridden_rotation = {e.asset_ref["side"]: e for e in overridden_events if e.field == "rotation"}
+    assert overridden_rotation["front"].action == "kept"  # front wasn't touched
+    assert overridden_rotation["back"].action == "edited"
+    assert str(overridden_rotation["back"].suggested) == "90" and str(overridden_rotation["back"].approved) == "180"
+
+
 def test_events_are_append_only(env):
     settings, engine, back = env
     with db.session(engine) as session:
@@ -160,7 +187,7 @@ def test_dictionary_applied_to_new_ocr(env, monkeypatch):
     class Reader:
         name = "fake"
 
-        def read(self, image):
+        def read(self, image, use_cls: bool = True):
             return [ocr.TextLine("JimmyDawley", 0.99, [[0, 0], [10, 0], [10, 10], [0, 10]])]
 
     monkeypatch.setattr(ocr, "get_reader", lambda: Reader())

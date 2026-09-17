@@ -25,7 +25,7 @@ TRAINING_STATUSES = (ScanStatus.APPROVED.value, ScanStatus.EXPORTED.value, ScanS
 
 FIELDS = ("ocr_line", "person", "place", "event", "date", "rotation", "crop", "pairing", "duplicate", "blank_back")
 OPERATOR = "operator"
-NO_MODEL = "none@0"  # no model proposes this value yet (e.g. rotation): the default is still recorded
+NO_MODEL = "none@0"  # no model proposed this value: the default is still recorded (e.g. rotation with no back/no signal)
 
 
 @functools.lru_cache(maxsize=None)
@@ -47,6 +47,7 @@ def producers(settings: Settings) -> dict[str, str]:
         "entities_rules_only": "entity-rules@1",
         "crop": "photo_bbox@1",
         "rotation": NO_MODEL,
+        "rotation_auto": "back-ocr-orientation@1",
         "pairing": f"pairing@{settings.scanner.first_side}-first",
         "duplicate": f"dhash@1(max={settings.analysis.dhash_max_distance})",
         "blank_back": f"edge-density@1(threshold={settings.analysis.blank_edge_density})",
@@ -147,7 +148,8 @@ def build_events(scan: Scan, settings: Settings, approval_id: str) -> list[Corre
     approved_date = scan.photo_date().label() if scan.date_precision != "unknown" else None
     add("date", date_entry.get("value"), approved_date, date_entry.get("producer", OPERATOR))
 
-    # Rotation per side (no model yet: the suggestion is 0 from "none@0").
+    # Rotation per side. Auto-detected from the back's OCR orientation (producer "rotation_auto") when it ran;
+    # otherwise the suggestion is 0 from "none@0" (no back, blank back, or no legible text at any angle).
     for side in ("front", "back"):
         if side == "back" and not scan.back_path:
             continue

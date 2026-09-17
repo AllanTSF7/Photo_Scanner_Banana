@@ -81,9 +81,16 @@ Renames, type changes and drops aren't migrated.
 ingested ─► analyzed ─► needs_review ─► approved ─► exported ─► stacked
                               │   ▲         │
                               ▼   └─────────┘  (UI can move between needs_review/approved/rejected)
-                           rejected
+                           rejected ─► (deleted, see below)
 ```
 v0.1: ingest creates scans directly in `needs_review`. `ingested`, `analyzed` and `stacked` are reserved.
+
+**Deleting a rejected scan [implemented]** (`DELETE /api/scans/{id}`): rejection itself never deletes anything -
+originals stay in `archive/<batch>/` exactly like every other status, and the button (`#btn-delete`) only appears
+once a scan is already `rejected`, never during normal review. Deletion is refused (409) unless **all** of: the
+scan is `rejected`, it has no `export` row, and it has no `correction_event` rows (i.e. it was never approved,
+even briefly, before being rejected - that history is training data and is never discarded). On success, the
+front/back/enhanced files are unlinked and the `scan` row is removed; nothing else is touched.
 
 ### Tables
 
@@ -194,7 +201,48 @@ also returns `duplex`), so a photo mid-scan is never counted as two while its ba
 - **Analysis** (dHash, blank-back metrics) runs on the cropped image.
 - **Swap sides** exchanges paths, crops and rotations and re-runs the checks without re-detecting crops.
   **Re-analyze** re-detects crops and keeps rotations.
-- **[planned]** Automatic rotation (text direction on backs, faces/DINOv3 on fronts), deskew.
+- **[implemented] Automatic rotation, front + back** (`banana/analysis/ocr/orientation.py`,
+  `apply_orientation_suggestion` in `banana/ingest/service.py`) - see 4d-3. **[planned]** deskew.
+
+## 4d-3. Auto-rotate (front + back come out upright)
+
+**[implemented]** `banana/analysis/ocr/orientation.py`, `apply_orientation_suggestion` in `banana/ingest/service.py`
+
+Front and back of one photo are captured in the **same duplex pass**: the back is mirrored left-right relative
+to the front, not independently rotated, so whichever rotation makes the back's text read upright is, in the
+ordinary case (a label written the same way up as the photo displays), also the front's correct rotation. One
+detected angle is applied as a suggestion to **both** `front_rotation` and `back_rotation`. No back, a blank
+back, or no legible text at any angle: no signal, and none is guessed - front-only orientation (faces, horizon)
+is out of scope; there's no reliable offline signal for it.
+
+**Why a single OCR-confidence score per rotation doesn't work** (measured, not assumed): RapidOCR (PP-OCR) is
+already close to rotation-invariant for *reading* text - its detector finds a line wherever it's turned, a
+hard-coded step in the library re-rotates any detected crop that comes out taller than wide before recognition,
+and its angle classifier auto-corrects upside-down text within its own line. Scoring recognition confidence at
+each of the 4 rotations gave near-identical scores at every angle in testing - genuinely no signal there.
+
+**Two-phase search** (`orientation.search`), each phase requiring a clear margin or returning "no signal":
+1. **Line shape** picks the axis. A detected line's bounding box (in the *un-rotated-by-RapidOCR* image
+   coordinates) is wide when text runs normally along the candidate rotation, narrow when it's off by 90°- real
+   lines are wide, not tall. Compares the two widest-scoring rotations against the two narrowest.
+2. **Recognition with the angle classifier off** (`reader.read(image, use_cls=False)`) picks the direction
+   within the winning axis. Without that auto-correction, recognition reads confidently right-side up and
+   produces little to nothing upside down (measured: full recognition at the correct angle, nothing at its
+   180° opposite).
+
+Runs once per scan: skipped once anything (operator or this search) has already decided a rotation, so it never
+overrides a manual choice, and **Swap sides** / **Re-analyze** keep their "rotations are kept" contract for
+free. The search itself runs at `analysis.orientation_search_max_side` (default 300px, small and cheap - up to
+6 OCR passes) before the real full-resolution OCR pass runs once at `analysis.ocr_max_side`.
+
+Recorded exactly like a crop suggestion: `corrections.suggest(scan, "rotation_front"/"rotation_back", angle,
+"back-ocr-orientation@1")`, and `front_rotation`/`back_rotation` are set directly (there's no separate
+"suggested" preview field for an image's rotation - the preview renders whatever the field currently holds).
+The Front/Back **auto-rotated** chip (`data-state="suggested"` while unedited) only shows when a rotation was
+actually applied (angle 0 - already upright - has nothing to flag); the manual Rotate buttons are always the
+override on either side, independently.
+
+Config: `analysis.orientation_search` (default `true`), `analysis.orientation_search_max_side` (default `300`).
 
 ## 4d. Text on back (OCR)
 
@@ -473,6 +521,7 @@ Values are HTML-escaped and written with `-E`, so newlines survive the ExifTool 
 | GET | `/api/scans?status=&limit=` | list (default limit 500, max 5000), ordered by id |
 | GET | `/api/scans/{id}` | one scan |
 | PATCH | `/api/scans/{id}` | update (see below) |
+| DELETE | `/api/scans/{id}` | delete a rejected scan's files + record; 409 unless rejected, unexported, and no correction history |
 | GET | `/api/scans/{id}/image/{front\|back}?size=` | cached JPEG preview, 64–4096 px (default 1600); 404 if missing |
 | GET | `/api/dates/parse?text=` | date candidates, best first |
 | POST | `/api/ingest` | run inbox ingest → `{batch, created[], skipped[], unmatched[], possible_duplicates[]}` |
@@ -620,6 +669,8 @@ Loaded from `--config`, else `$BANANA_CONFIG`, else `./config.toml`, else defaul
 | `analysis.dhash_max_distance` | `6` | |
 | `analysis.read_text` | `true` | OCR backs during ingest/re-analyze |
 | `analysis.ocr_max_side` | `1800` | px, long side given to OCR |
+| `analysis.orientation_search` | `true` | auto-rotate front+back from the back's OCR orientation (needs `ocr` extra) |
+| `analysis.orientation_search_max_side` | `300` | px, long side per rotation tried (up to 6 cheap passes) |
 | `dates.two_digit_year_pivot` | current year mod 100 | |
 | `scanner.host` | `""` | scanner address for the status indicator (FF-680W: `192.168.16.178`) |
 | `scanner.port` | `1865` | Epson network scan port; ports 80/443 serve the Epson web config |

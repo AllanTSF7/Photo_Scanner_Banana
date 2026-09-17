@@ -113,7 +113,15 @@ Something tried to edit or delete stored corrections, which the database refuses
 re-approve the scan to record a newer set.
 
 ### Photo is upside down or sideways
-Normal: the scanner can't tell which way is up. Use **Rotate left / right** (or <kbd>R</kbd>). Automatic rotation is planned.
+Normal: the scanner can't tell which way is up. When the back has readable text, the app usually auto-rotates
+both sides for you (look for the **auto-rotated** chip); when it can't (no back, blank back, unreadable text),
+use **Rotate left / right** (or <kbd>R</kbd>).
+
+### Auto-rotation picked the wrong side
+Rare - it only rotates when confident. Causes: the back was deliberately written sideways or upside down
+relative to the photo, or a low-text back gave a false-positive read. Recovery: manual **Rotate** always works
+and overrides it, on either side independently. If it's happening often, set `analysis.orientation_search =
+false` to turn auto-rotation off entirely.
 
 ### Front and back are swapped
 Use **Swap front/back**. If *every* scan is swapped, `scanner.first_side` doesn't match how photos are loaded:
@@ -178,6 +186,12 @@ Make sure Immich excludes `**/.staging/**`.
 ### Re-scanning a photo with the same file name
 Ingest skips base names it has already seen, so a rescan saved as `Attic3_0001` stays in the inbox.
 Rename the new files with another prefix or number (for example `Attic3r_0001`), then ingest.
+
+### "Delete permanently" isn't there, or refuses
+The button only appears once a scan is **Rejected** (never during normal review - open the Rejected tab and
+select it). If it's there but the request fails: the scan was approved at some point before being rejected (it
+has correction history the learning loop uses) or it was already exported. Neither is deletable; leave it
+rejected instead - it costs nothing to keep.
 
 ---
 

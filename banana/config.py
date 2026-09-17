@@ -30,6 +30,8 @@ class AnalysisConfig(BaseModel):
     read_text: bool = True  # OCR photo backs during ingest/re-analyze (needs the "ocr" extra)
     ocr_max_side: int = 1800  # long side of the image given to OCR
     derive_entities: bool = True  # fill empty People/Places/Events from the description (needs the "ner" extra for NER)
+    orientation_search: bool = True  # auto-rotate front+back from the back's OCR orientation (needs the "ocr" extra)
+    orientation_search_max_side: int = 300  # long side per rotation tried; small and cheap, tried up to 4x
 
 
 class DatesConfig(BaseModel):

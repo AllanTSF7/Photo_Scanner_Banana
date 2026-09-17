@@ -139,6 +139,7 @@
             <div class="frame loading" id="frame-front"><img id="img-front" alt="Front of photo"></div>
             <figcaption>
               <span class="side-label">Front</span> <span id="front-crop" class="chip"></span>
+              <span id="front-rotation" class="chip" hidden>auto-rotated</span>
               <span class="rotate">
                 <button type="button" class="btn small" data-rotate="front" data-step="-90" data-shortcut="shift+r">Rotate left</button>
                 <button type="button" class="btn small" data-rotate="front" data-step="90" data-shortcut="r">Rotate right</button>
@@ -149,6 +150,7 @@
             <div class="frame loading" id="frame-back"><img id="img-back" alt="Back of photo"></div>
             <figcaption>
               <span class="side-label">Back</span> <span id="back-type" class="chip"></span>
+              <span id="back-rotation" class="chip" hidden>auto-rotated</span>
               <span class="rotate">
                 <button type="button" class="btn small" data-rotate="back" data-step="-90">Rotate left</button>
                 <button type="button" class="btn small" data-rotate="back" data-step="90">Rotate right</button>
@@ -194,6 +196,8 @@
 
           <div class="form-actions">
             <button type="button" class="btn danger" id="btn-reject" data-shortcut="x">Reject</button>
+            <button type="button" class="btn irreversible" id="btn-delete" hidden
+                    title="Removes the original files. Only available for a rejected scan.">Delete permanently</button>
             <span class="spacer"></span>
             <span id="save-state" class="muted"></span>
             <button type="submit" class="btn" id="btn-save" data-shortcut="ctrl+s">Save</button>
