@@ -90,7 +90,13 @@ originals stay in `archive/<batch>/` exactly like every other status, and the bu
 once a scan is already `rejected`, never during normal review. Deletion is refused (409) unless **all** of: the
 scan is `rejected`, it has no `export` row, and it has no `correction_event` rows (i.e. it was never approved,
 even briefly, before being rejected - that history is training data and is never discarded). On success, the
-front/back/enhanced files are unlinked and the `scan` row is removed; nothing else is touched.
+front/back/enhanced files are unlinked and the `scan` row is removed.
+
+`duplicate_group_id` isn't a real foreign key (`banana/models.py`), so before removal
+`release_from_duplicate_group` (`banana/ingest/service.py`) re-points any other scan that named this one as
+its duplicate-group anchor - to a promoted survivor if more than one remains, or clears it if this was the only
+one, so nothing is ever left saying "possible rescan of #N" for an id that no longer exists. `banana
+repair-duplicates` fixes any such reference left dangling from before this existed.
 
 ### Tables
 
@@ -650,6 +656,7 @@ The rules live in CLAUDE.md > **UI DESIGN SYSTEM** (direction: *Darkroom*). This
 | `banana export --manual-json FILE [--config]` | import a hand-written batch spec ([manual-export.md](manual-export.md)) and export it |
 | `banana serve [--host 0.0.0.0] [--port 8000]` | API + UI (config from `BANANA_CONFIG`) |
 | `banana worker [--config]` | job worker loop |
+| `banana repair-duplicates [--config]` | fix any `duplicate_group_id` left pointing at a deleted scan; safe to re-run, no-op when nothing's dangling |
 
 ---
 

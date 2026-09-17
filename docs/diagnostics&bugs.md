@@ -256,6 +256,7 @@ Don't edit the database while the server is running unless you know what you're 
 | B-21 | After a Windows restart, phones can't reach the app although the port-forward rule exists | medium | open: IP Helper starts before Wi-Fi has its address and never listens on it. Rerun `share_on_lan.ps1` as admin (or `Restart-Service iphlpsvc`) |
 | B-22 | Every page load logged a 404 for `/api/dev/reload-token` on the normal server | low | fixed: endpoint always exists and returns `enabled: false` outside dev (found with the Playwright CLI) |
 | B-23 | Approve then Reject pressed quickly: the second action was silently dropped | medium | fixed: status actions queue and apply to the scan shown next; selection is never cleared during re-render; `test_rapid_approve_then_reject_acts_on_the_next_scan` |
+| B-24 | Deleting a rejected scan left other scans saying "possible rescan of #N" for the deleted id forever | medium | fixed: `release_from_duplicate_group` re-anchors or clears followers before delete; `banana repair-duplicates` fixes data from before the fix; `test_deleting_a_duplicate_anchor_reassigns_its_follower` |
 
 #### B-6 Scan interrupted by a server restart
 Scans run inside the server process. Restarting it (deploy, crash, or the live dev server reloading after a

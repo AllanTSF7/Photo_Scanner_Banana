@@ -127,6 +127,49 @@ def analyze_scan(session: Session, scan: Scan, settings: Settings, *, detect_cro
     return scan
 
 
+def _reanchor_duplicate_group(session: Session, followers: list[Scan]) -> None:
+    """Re-point a group of scans that shared a now-gone anchor: promote a survivor, or clear it if there's
+    only one left (nothing left to call it a possible rescan of)."""
+    if len(followers) == 1:
+        followers[0].duplicate_group_id = None
+    else:
+        new_anchor, *rest = sorted(followers, key=lambda s: s.id)
+        new_anchor.duplicate_group_id = None  # the anchor itself never carries a duplicate_group_id
+        for follower in rest:
+            follower.duplicate_group_id = new_anchor.id
+    for follower in followers:
+        session.add(follower)
+
+
+def release_from_duplicate_group(session: Session, scan: Scan) -> None:
+    """Before deleting `scan`, re-point anything that named it as their duplicate-group anchor.
+
+    `duplicate_group_id` isn't a real foreign key (a scan can be deleted long after it's flagged others), so
+    without this a deleted scan's id would stay stuck in every follower's `duplicate_group_id` forever - the
+    UI would keep saying "possible rescan of #N" for an id that no longer exists.
+    """
+    followers = list(session.exec(select(Scan).where(Scan.duplicate_group_id == scan.id)))
+    if followers:
+        _reanchor_duplicate_group(session, followers)
+
+
+def repair_dangling_duplicate_groups(session: Session) -> int:
+    """Fix any `duplicate_group_id` left pointing at a scan that no longer exists - e.g. one deleted before
+    `release_from_duplicate_group` existed. Returns how many scans were changed. Safe to run any time; a no-op
+    when there's nothing dangling."""
+    existing_ids = set(session.exec(select(Scan.id)))
+    targets = {
+        gid for gid in session.exec(select(Scan.duplicate_group_id).where(Scan.duplicate_group_id.is_not(None)))
+        if gid not in existing_ids
+    }
+    changed = 0
+    for target in targets:
+        followers = list(session.exec(select(Scan).where(Scan.duplicate_group_id == target)))
+        _reanchor_duplicate_group(session, followers)
+        changed += len(followers)
+    return changed
+
+
 def known_entities(session: Session, exclude_id: int | None = None) -> Entities:
     """Every person, place and event already entered on other scans: the family's own vocabulary."""
     known = Entities()

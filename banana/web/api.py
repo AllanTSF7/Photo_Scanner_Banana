@@ -29,6 +29,7 @@ from banana.analysis import entities
 from banana.core import corrections, dictionary, proposals
 from banana.ingest.service import (
     analyze_scan, extract_for_scan, ingest_inbox, known_entities, read_back_text, record_entity_suggestions,
+    release_from_duplicate_group,
 )
 from banana.models import Batch, CorrectionEvent, Export, Scan, ScanStatus, SettingOverride, utcnow
 from banana.scanner import sane
@@ -273,6 +274,7 @@ def delete_scan(scan_id: int, session: Session = Depends(get_session)) -> dict:
     if session.exec(select(CorrectionEvent).where(CorrectionEvent.scan_id == scan_id)).first():
         raise HTTPException(409, "this scan has correction history used for training and can't be deleted")
 
+    release_from_duplicate_group(session, scan)  # never leave another scan's "possible rescan of #N" dangling
     removed = []
     for value in {scan.front_path, scan.back_path, scan.front_enhanced_path}:
         if not value:

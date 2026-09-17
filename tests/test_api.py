@@ -248,6 +248,68 @@ def test_delete_scan_refuses_when_already_exported(client):
     assert "exported" in response.json()["detail"]
 
 
+def test_deleting_a_duplicate_anchor_reassigns_its_follower(client):
+    c, _ = client
+    c.post("/api/ingest")
+    scans = {s["source_key"]: s for s in c.get("/api/scans").json()}
+    anchor, follower = scans["Attic3_0001"]["id"], scans["Attic3_0007"]["id"]
+    assert c.get(f"/api/scans/{follower}").json()["duplicate_group_id"] == anchor
+
+    c.patch(f"/api/scans/{anchor}", json={"status": "rejected"})
+    assert c.delete(f"/api/scans/{anchor}").status_code == 200
+    # Never a dangling "possible rescan of #<deleted id>" - the sole survivor just isn't a duplicate of anything.
+    assert c.get(f"/api/scans/{follower}").json()["duplicate_group_id"] is None
+
+
+def test_deleting_a_duplicate_anchor_promotes_a_new_one_for_the_rest(client):
+    import banana.web.api as api
+    from banana.models import Scan
+
+    c, _ = client
+    c.post("/api/ingest")
+    scans = c.get("/api/scans").json()
+    a, b, c_scan = (s["id"] for s in scans[:3])
+    with api.db.session(api.engine) as session:  # simulate a 3-way group: b and c_scan both point at a
+        for sid in (b, c_scan):
+            row = session.get(Scan, sid)
+            row.duplicate_group_id = a
+            session.add(row)
+        session.commit()
+    c.patch(f"/api/scans/{a}", json={"status": "rejected"})
+    assert c.delete(f"/api/scans/{a}").status_code == 200
+
+    new_anchor, remaining_follower = sorted((b, c_scan))
+    assert c.get(f"/api/scans/{new_anchor}").json()["duplicate_group_id"] is None
+    assert c.get(f"/api/scans/{remaining_follower}").json()["duplicate_group_id"] == new_anchor
+
+
+def test_repair_dangling_duplicate_groups(client):
+    """Data that went dangling before this repair existed (a scan deleted without reassigning its followers)."""
+    import banana.web.api as api
+    from banana.ingest.service import repair_dangling_duplicate_groups
+    from banana.models import Scan
+
+    c, _ = client
+    c.post("/api/ingest")
+    scans = {s["source_key"]: s for s in c.get("/api/scans").json()}
+    anchor, follower = scans["Attic3_0001"]["id"], scans["Attic3_0007"]["id"]
+
+    with api.db.session(api.engine) as session:
+        session.delete(session.get(Scan, anchor))  # bypass the guarded endpoint, as old data would have
+        session.commit()
+
+    assert c.get(f"/api/scans/{follower}").json()["duplicate_group_id"] == anchor  # dangling, as reported
+
+    with api.db.session(api.engine) as session:
+        changed = repair_dangling_duplicate_groups(session)
+        session.commit()
+    assert changed == 1
+    assert c.get(f"/api/scans/{follower}").json()["duplicate_group_id"] is None
+
+    with api.db.session(api.engine) as session:  # idempotent
+        assert repair_dangling_duplicate_groups(session) == 0
+
+
 def test_demo_password_protects_everything(client, monkeypatch):
     import base64
     import importlib
