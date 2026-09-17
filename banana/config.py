@@ -48,6 +48,7 @@ class ScannerConfig(BaseModel):
     auto_crop: bool = True
     skew_correction: bool = True
     timeout_seconds: int = 3600
+    max_feeder_count: int = 36  # the FF-680W ADF hopper's measured capacity; caps "Whole stack" so it can't jam past it
     after_scan: Literal["review", "inbox"] = "review"  # default destination; the UI can choose per scan
     # Which side of each duplex pair SANE delivers first. The FF-680W (photos loaded face down) reads the back first.
     first_side: Literal["front", "back"] = "back"

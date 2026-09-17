@@ -83,6 +83,7 @@ def test_scanner_status(client, monkeypatch):
         monkeypatch.setattr(api.settings.scanner, "port", port)
         status = c.get("/api/scanner").json()
         assert status["configured"] and status["online"] and status["port"] == port
+        assert status["max_feeder_count"] == api.settings.scanner.max_feeder_count
         assert status["device"] == "epsonds:net:127.0.0.1" and status["scan"]["state"] == "idle"
     assert c.get("/api/scanner").json()["online"] is False
 

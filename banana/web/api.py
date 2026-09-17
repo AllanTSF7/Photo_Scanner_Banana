@@ -146,7 +146,7 @@ def scanner_status() -> dict:
     return {
         "configured": True, "host": cfg.host, "port": cfg.port, "online": sane.is_online(cfg),
         "device": cfg.device, "source": cfg.source, "mode": cfg.mode, "resolution": cfg.resolution,
-        "after_scan": cfg.after_scan, "duplex": cfg.duplex,
+        "after_scan": cfg.after_scan, "duplex": cfg.duplex, "max_feeder_count": cfg.max_feeder_count,
         "scan": scans.status(),
     }
 

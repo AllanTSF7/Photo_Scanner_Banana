@@ -66,6 +66,11 @@ Another program (Epson ScanSmart on a PC, or a second scan) is using the scanner
 In duplex mode every photo should produce two pages. The last photo has no back image. Usually a misfeed or jam:
 check that photo, rescan it if needed.
 
+### Scan message says "feeder capped at 36, scan again for more"
+Expected, not a bug: **Whole stack** stops on its own at `scanner.max_feeder_count` (default 36, the FF-680W ADF
+hopper's measured capacity) so a larger stack can't jam the feeder. The first 36 photos scanned fine; load the
+rest and click **Scan feeder** again.
+
 ### Scans are tall pages with the photo at the top ("vertical")
 The scanner doesn't crop through SANE (B-8), so the app detects the photo itself. If a scan shows **full page**:
 click **Re-detect crop**. If it's still wrong, the photo may be on a background the detector doesn't recognize

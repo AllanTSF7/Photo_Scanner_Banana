@@ -57,16 +57,20 @@ and dropped later, so duplex is always on.
 
 ### Step 1: Scan
 1. Load a stack of photos into the feeder, following the scanner's loading guide.
-   Keep photos of similar size together and don't overload the feeder.
-2. Choose **Feed**: **Whole stack** scans until the feeder is empty. **One photo** scans a single photo (front and back),
-   which is handy for testing or rescanning one print. The button then reads **Scan one photo**.
+   Keep photos of similar size together and don't overload the feeder. **Whole stack** stops on its own at
+   36 photos even if more are loaded, so the hopper is never pushed past what it's rated for - if you have
+   more than that, scan in batches of up to 36.
+2. Choose **Feed**: **Whole stack** scans until the feeder is empty (or the 36-photo cap). **One photo** scans a
+   single photo (front and back), which is handy for testing or rescanning one print. The button then reads
+   **Scan one photo**.
 3. Choose **After scan**:
    - **Add to review queue** (usual): photos go straight into **To review** when the scan finishes.
    - **Leave in inbox**: files are only saved into the inbox folder. Click **Ingest inbox** when you want to review them.
    The page remembers your choice.
-4. Click **Scan feeder**. The top bar shows **Scanning, N pages**, then **Processing N pages**.
+4. Click **Scan feeder**. The top bar shows **Scanning, N photos**, then **Processing N photos**.
 5. When the feeder is empty you see a message like "Scanned 10 photo(s), 20 page(s). Ingested 10 scan(s)"
-   (or "…20 file(s) left in the inbox").
+   (or "…20 file(s) left in the inbox"). If it stops at "feeder capped at 36, scan again for more," load the
+   rest and click **Scan feeder** again - nothing from the first batch is lost.
 
 Each photo becomes one front and one back (duplex). A message about an "odd page count" means the last photo
 has no back image. Check that photo.

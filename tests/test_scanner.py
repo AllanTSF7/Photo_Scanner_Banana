@@ -50,14 +50,26 @@ def test_args():
     assert args[:3] == ["scanimage", "-d", "epsonds:net:192.168.16.178"]
     assert "--adf-crp=no" in args and "--adf-skew=yes" in args
     assert args[args.index("--resolution") + 1] == "300"
-    assert args[-1] == "--batch=/x/page_%04d.jpg"
+    assert args[args.index("--batch=/x/page_%04d.jpg") + 1] == "--batch-count=72"  # 36-photo cap, duplex
 
 
 def test_one_photo_mode_limits_batch_count():
     duplex = sane.scanimage_args(ScannerConfig(host="h"), Path("/x"), count="one")
     front_only = sane.scanimage_args(ScannerConfig(host="h", source="ADF Front"), Path("/x"), count="one")
     assert duplex[-1] == "--batch-count=2" and front_only[-1] == "--batch-count=1"
-    assert not any(a.startswith("--batch-count") for a in sane.scanimage_args(ScannerConfig(host="h"), Path("/x")))
+
+
+def test_whole_stack_mode_caps_batch_count_at_feeder_capacity():
+    # A ceiling, not a forced count: scanimage's own out-of-documents detection still stops early on a
+    # smaller stack (see test_duplex_scan_pairs_pages, which scans only 5 pages despite this cap).
+    duplex = sane.scanimage_args(ScannerConfig(host="h", max_feeder_count=36), Path("/x"), count="all")
+    front_only = sane.scanimage_args(
+        ScannerConfig(host="h", source="ADF Front", max_feeder_count=36), Path("/x"), count="all"
+    )
+    assert duplex[-1] == "--batch-count=72" and front_only[-1] == "--batch-count=36"
+
+    custom = sane.scanimage_args(ScannerConfig(host="h", max_feeder_count=10), Path("/x"), count="all")
+    assert custom[-1] == "--batch-count=20"
 
 
 @pytest.mark.parametrize("first_side,front_page,back_page", [("back", 2, 1), ("front", 1, 2)])
@@ -110,6 +122,16 @@ def test_duplex_scan_pairs_pages(tmp_path):
     ])
     assert ingested and status["ingest"] == {"created": [1, 2, 3]}
     assert not [p for p in inbox.iterdir() if p.name.startswith(".scanning")]  # staging removed
+
+
+def test_whole_stack_message_warns_when_the_cap_is_hit(tmp_path):
+    # A small cap so the fake scanner can actually hit it without a huge fixture.
+    cfg = ScannerConfig(host="scanner", first_side="front", max_feeder_count=2, scanimage=fake_scanimage(tmp_path, 4))
+    controller = sane.ScanController(cfg, tmp_path / "inbox")
+    controller.start()
+    status = wait(controller)
+    assert status["state"] == "done" and status["pages"] == 4
+    assert "feeder capped at 2, scan again for more" in status["message"]
 
 
 def test_front_only_scan(tmp_path):

@@ -163,7 +163,12 @@ v0.1: ingest creates scans directly in `needs_review`. `ingested`, `analyzed` an
 - Content orientation depends on how each photo was placed; SANE applies no rotation and writes no EXIF orientation.
 
 ### Count
-`count: "all"` scans until the feeder is empty. `count: "one"` adds `--batch-count=2` (duplex) or `1`.
+`count: "all"` scans until the feeder is empty, capped at `scanner.max_feeder_count` (default 36, the FF-680W ADF
+hopper's measured capacity) photos - `--batch-count={max_feeder_count * (2 if duplex else 1)}`. This is a ceiling,
+not a forced count: `scanimage`'s own out-of-documents detection still stops early on a smaller stack, so nothing
+changes for a normal-sized batch. If a run hits the cap exactly, the finished message adds "feeder capped at N,
+scan again for more" so the operator knows to run **Scan feeder** again for the rest of a larger stack rather than
+overloading the hopper in one pass. `count: "one"` adds `--batch-count=2` (duplex) or `1`.
 
 `ScanRun.pages` (polled by `GET /api/scanner/scan`) is a raw SANE page count - two pages per duplex photo. The
 finished-scan message already converts this to photos (`photos = (pages + 1) // 2` when duplex); the **live**
@@ -625,6 +630,7 @@ Loaded from `--config`, else `$BANANA_CONFIG`, else `./config.toml`, else defaul
 | `scanner.resolution` | `600` | dpi (50–600) |
 | `scanner.auto_crop`, `scanner.skew_correction` | `true`, `true` | |
 | `scanner.timeout_seconds` | `3600` | maximum run time for one scan |
+| `scanner.max_feeder_count` | `36` | ADF hopper capacity; caps "Whole stack" (`--batch-count`), never a forced count |
 | `scanner.after_scan` | `review` | default destination: `review` \| `inbox` |
 | `scanner.first_side` | `back` | which page of a duplex pair is the photo's back (FF-680W: `back`) |
 | `exiftool.path` | `exiftool` | |
