@@ -88,6 +88,15 @@ click **Re-detect crop**. If it's still wrong, the photo may be on a background 
 
 ### Sharing the dev laptop's app with other devices on the network
 The server runs inside WSL, which other devices can't reach directly. It has **no login (B-3)**, so share only on a trusted network.
+
+**On the tailnet (recommended for a phone/iPad already on the same Tailscale network):** the default server
+binding (`127.0.0.1:8000`) is enough - no `BANANA_HOST=0.0.0.0` needed. In an **ordinary** PowerShell (no admin):
+`powershell -ExecutionPolicy Bypass -File C:\Users\TSF2\Photo_Scanner_Banana\scripts\serve_on_tailnet.ps1`.
+It forwards this device's own tailnet address (raw TCP, no TLS) to `127.0.0.1:8000` and prints the URL - run it
+once, it's safe to re-run any time (including every time the server restarts), and it's a no-op if Tailscale
+isn't installed or connected. Stop with the same command plus `-Remove`.
+
+**On the local network (LAN, no Tailscale needed):**
 1. Start the server so it accepts forwarded connections. For device testing use the stable server (the live-reload one reloads
    phones whenever code changes): [shell] `BANANA_HOST=0.0.0.0 BANANA_SKIP_TESTS=1 bash scripts/serve_local.sh`.
    (`BANANA_HOST=0.0.0.0 bash scripts/dev_live.sh` also works for live edits.)
