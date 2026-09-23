@@ -83,6 +83,7 @@ def test_scanner_status(client, monkeypatch):
         monkeypatch.setattr(api.settings.scanner, "port", port)
         status = c.get("/api/scanner").json()
         assert status["configured"] and status["online"] and status["port"] == port
+        assert status["max_feeder_count"] == api.settings.scanner.max_feeder_count
         assert status["device"] == "epsonds:net:127.0.0.1" and status["scan"]["state"] == "idle"
     assert c.get("/api/scanner").json()["online"] is False
 
@@ -152,7 +153,7 @@ def test_read_text_endpoint(client, monkeypatch):
     class Reader:
         name = "fake"
 
-        def read(self, image):
+        def read(self, image, use_cls: bool = True):
             return [ocr.TextLine("Xmas '84", 0.97, [[0, 0]] * 4), ocr.TextLine("Grandma & John", 0.95, [[0, 0]] * 4)]
 
     monkeypatch.setattr(ocr, "get_reader", lambda: Reader())
@@ -195,6 +196,118 @@ def test_autocorrect_endpoint_fixes_typos_and_protects_known_names(client):
 
     clean = c.post("/api/autocorrect", json={"text": "Christmas 1984"}).json()
     assert clean["text"] == "Christmas 1984" and clean["fixes"] == []
+
+
+def test_delete_scan_only_allowed_for_rejected_with_no_history(client):
+    c, root = client
+    c.post("/api/ingest")
+    scans = {s["source_key"]: s for s in c.get("/api/scans").json()}
+
+    needs_review = scans["Attic3_0002"]["id"]
+    assert c.delete(f"/api/scans/{needs_review}").status_code == 409  # not rejected yet
+
+    c.patch(f"/api/scans/{needs_review}", json={"status": "rejected"})
+    front_path = Path(scans["Attic3_0002"]["front_path"])
+    back_path = Path(scans["Attic3_0002"]["back_path"])
+    assert front_path.exists() and back_path.exists()
+
+    deleted = c.delete(f"/api/scans/{needs_review}").json()
+    assert sorted(deleted["files_removed"]) == sorted([front_path.name, back_path.name])
+    assert not front_path.exists() and not back_path.exists()
+    assert c.get(f"/api/scans/{needs_review}").status_code == 404
+
+
+def test_delete_scan_refuses_when_it_has_training_history(client):
+    c, _ = client
+    c.post("/api/ingest")
+    scans = {s["source_key"]: s for s in c.get("/api/scans").json()}
+    sid = scans["Attic3_0002"]["id"]
+
+    c.patch(f"/api/scans/{sid}", json={"date_text": "1990", "status": "approved"})  # writes correction events
+    c.patch(f"/api/scans/{sid}", json={"status": "rejected"})  # later rejected - events still exist
+    response = c.delete(f"/api/scans/{sid}")
+    assert response.status_code == 409
+    assert "training" in response.json()["detail"]
+
+    front_path = Path(scans["Attic3_0002"]["front_path"])
+    assert front_path.exists()  # refused: nothing touched
+
+
+@pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
+def test_delete_scan_refuses_when_already_exported(client):
+    c, _ = client
+    c.post("/api/ingest")
+    scans = {s["source_key"]: s for s in c.get("/api/scans").json()}
+    sid = scans["Attic3_0001"]["id"]
+
+    c.patch(f"/api/scans/{sid}", json={"date_text": "1990", "status": "approved"})
+    c.post("/api/export")
+    c.patch(f"/api/scans/{sid}", json={"status": "rejected"})
+    response = c.delete(f"/api/scans/{sid}")
+    assert response.status_code == 409
+    assert "exported" in response.json()["detail"]
+
+
+def test_deleting_a_duplicate_anchor_reassigns_its_follower(client):
+    c, _ = client
+    c.post("/api/ingest")
+    scans = {s["source_key"]: s for s in c.get("/api/scans").json()}
+    anchor, follower = scans["Attic3_0001"]["id"], scans["Attic3_0007"]["id"]
+    assert c.get(f"/api/scans/{follower}").json()["duplicate_group_id"] == anchor
+
+    c.patch(f"/api/scans/{anchor}", json={"status": "rejected"})
+    assert c.delete(f"/api/scans/{anchor}").status_code == 200
+    # Never a dangling "possible rescan of #<deleted id>" - the sole survivor just isn't a duplicate of anything.
+    assert c.get(f"/api/scans/{follower}").json()["duplicate_group_id"] is None
+
+
+def test_deleting_a_duplicate_anchor_promotes_a_new_one_for_the_rest(client):
+    import banana.web.api as api
+    from banana.models import Scan
+
+    c, _ = client
+    c.post("/api/ingest")
+    scans = c.get("/api/scans").json()
+    a, b, c_scan = (s["id"] for s in scans[:3])
+    with api.db.session(api.engine) as session:  # simulate a 3-way group: b and c_scan both point at a
+        for sid in (b, c_scan):
+            row = session.get(Scan, sid)
+            row.duplicate_group_id = a
+            session.add(row)
+        session.commit()
+    c.patch(f"/api/scans/{a}", json={"status": "rejected"})
+    assert c.delete(f"/api/scans/{a}").status_code == 200
+
+    new_anchor, remaining_follower = sorted((b, c_scan))
+    assert c.get(f"/api/scans/{new_anchor}").json()["duplicate_group_id"] is None
+    assert c.get(f"/api/scans/{remaining_follower}").json()["duplicate_group_id"] == new_anchor
+
+
+def test_repair_dangling_duplicate_groups(client):
+    """Data that went dangling before this repair existed (a scan deleted without reassigning its followers)."""
+    import banana.web.api as api
+    from banana.ingest.service import repair_dangling_duplicate_groups
+    from banana.models import Scan
+
+    c, _ = client
+    c.post("/api/ingest")
+    scans = {s["source_key"]: s for s in c.get("/api/scans").json()}
+    anchor, follower = scans["Attic3_0001"]["id"], scans["Attic3_0007"]["id"]
+
+    with api.db.session(api.engine) as session:
+        session.delete(session.get(Scan, anchor))  # bypass the guarded endpoint, as old data would have
+        session.commit()
+
+    assert c.get(f"/api/scans/{follower}").json()["duplicate_group_id"] == anchor  # dangling, as reported
+
+    with api.db.session(api.engine) as session:
+        changed = repair_dangling_duplicate_groups(session)
+        session.commit()
+    assert changed == 1
+    assert c.get(f"/api/scans/{follower}").json()["duplicate_group_id"] is None
+
+    with api.db.session(api.engine) as session:  # idempotent
+        assert repair_dangling_duplicate_groups(session) == 0
 
 
 def test_demo_password_protects_everything(client, monkeypatch):
@@ -245,7 +358,53 @@ def test_component_health(client):
     assert by_name["database"]["status"] == "ok"
     assert by_name["inbox"]["status"] == "ok"
     assert by_name["scanner"]["status"] == "off"  # not configured in this fixture
+    assert by_name["immich"]["status"] == "off"  # not configured, and never contacted (immich.enabled defaults false)
     assert data["overall"] in ("ok", "warn", "fail")
+
+
+def test_immich_settings_never_echo_the_raw_api_key(client):
+    c, _ = client
+    assert c.get("/api/immich/settings").json() == {
+        "enabled": False, "url": "", "library_id": "", "import_path_prefix": "/mnt/photo_vault/sorted",
+        "api_key_set": False, "api_key_last4": None,
+    }
+
+    saved = c.patch("/api/immich/settings", json={
+        "enabled": True, "url": "http://immich.example", "library_id": "lib-1", "api_key": "supersecretkey1234",
+    }).json()
+    assert saved["api_key_set"] is True and saved["api_key_last4"] == "1234"
+    assert "api_key" not in saved and "supersecretkey1234" not in str(saved)
+
+    # Re-fetching, and updating an unrelated field, both still never surface the raw key.
+    for response in (c.get("/api/immich/settings"), c.patch("/api/immich/settings", json={"enabled": False})):
+        body = response.json()
+        assert body["api_key_set"] is True and body["api_key_last4"] == "1234"
+        assert "supersecretkey1234" not in str(body)
+
+
+def test_immich_status_makes_no_network_call_when_disabled(client):
+    c, _ = client
+    # Even with a URL/key saved, disabled means no attempt is made - error stays None, not a connection failure.
+    c.patch("/api/immich/settings", json={"url": "http://127.0.0.1:1", "api_key": "k"})  # port 1: nothing listens
+    status = c.get("/api/immich/status").json()
+    assert status == {"enabled": False, "connected": False, "asset_count": None, "error": None}
+
+
+def test_immich_check_refused_when_disabled(client):
+    c, _ = client
+    response = c.post("/api/immich/check")
+    assert response.status_code == 409
+    assert "enabled" in response.json()["detail"]
+
+
+def test_operator_immich_duplicate_flag_round_trips(client):
+    c, _ = client
+    c.post("/api/ingest")
+    sid = c.get("/api/scans").json()[0]["id"]
+    assert c.get(f"/api/scans/{sid}").json()["operator_immich_duplicate"] is False
+    updated = c.patch(f"/api/scans/{sid}", json={"operator_immich_duplicate": True}).json()
+    assert updated["operator_immich_duplicate"] is True
+    assert updated["immich_duplicate_asset_id"] is None
 
 
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")

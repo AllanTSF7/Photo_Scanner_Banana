@@ -224,7 +224,7 @@ def test_date_field_preview_valid_invalid_and_clear(page):
 
     date.fill("sometime maybe")
     expect(page.locator("#date-preview .bad")).to_be_visible()
-    page.click("button[type=submit]")
+    page.click("#form button[type=submit]")
     expect(toast(page)).to_contain_text("could not understand date")
     expect(toast(page)).to_have_class("toast error")
 
@@ -260,7 +260,7 @@ def test_description_and_chip_inputs(page):
         chip_input.press("Enter")
 
     page.fill("#date-text", "Dec 25, 1984")
-    page.click("button[type=submit]")
+    page.click("#form button[type=submit]")
     expect(toast(page)).to_have_text("Saved")
     expect(page.locator("#save-state")).to_have_text("")
 
@@ -643,7 +643,7 @@ def test_people_places_events_derived_from_description(page):
     expect(_chips(page, "events").filter(has_text="Wedding")).to_have_count(0)
     expect(page.locator('.chips-input[data-field="events"] .suggestion', has_text="Wedding")).to_have_count(0)
 
-    page.click("button[type=submit]")
+    page.click("#form button[type=submit]")
     expect(toast(page)).to_have_text("Saved")
     page.reload()
     page.locator("#scan-list li").first.click()
@@ -657,7 +657,7 @@ def test_filled_fields_get_suggestion_chips_not_overwrites(page):
     box = page.locator('.chips-input[data-field="people"]')
     box.locator("input").type("Grandpa Joe")
     box.locator("input").press("Enter")
-    page.click("button[type=submit]")
+    page.click("#form button[type=submit]")
     expect(toast(page)).to_have_text("Saved")
     page.reload()
     page.locator("#scan-list li").first.click()
@@ -988,3 +988,189 @@ def test_autocorrect_leaves_correct_text_and_short_names_alone(page):
     expect(page.locator('.autocorrect-note[data-for="description"]')).to_be_hidden()
     expect(description).to_have_value("Christmas with Mary and Jon")
 
+
+
+# ---------------------------------------------------------------- auto-rotate (banana/analysis/ocr/orientation.py)
+
+
+def _write_sideways_scan(root):
+    """A photo whose back was fed in sideways: readable text, but rotated 90 from upright."""
+    from PIL import Image, ImageDraw
+
+    from banana import imaging
+
+    upright = root / "_upright.jpg"
+    image = Image.new("RGB", (1400, 700), (250, 246, 236))
+    draw = ImageDraw.Draw(image)
+    for i, text in enumerate(["Grandma and John", "Lake Erie", "July 4, 1976"]):
+        draw.text((120, 120 + i * 150), text, fill=(20, 20, 20), font_size=90)
+    image.save(upright)
+
+    inbox = root / "inbox"
+    Image.new("RGB", (900, 600), (80, 120, 160)).save(inbox / "Rotated_0001.jpg")  # front: any photo content
+    imaging.open_edited(upright, imaging.Edit(None, 90)).save(inbox / "Rotated_0001_b.jpg")  # back: sideways
+    upright.unlink()
+
+
+@pytest.mark.parametrize("read_text", [True], indirect=True)
+def test_auto_rotate_chip_shows_and_manual_rotate_still_overrides(page, server):
+    pytest.importorskip("rapidocr_onnxruntime")
+    _write_sideways_scan(server["root"])
+    page.click("#btn-ingest")
+    expect(toast(page)).to_contain_text("Ingested 8 scan(s)", timeout=90000)  # 7 demo scans + this one
+
+    scan = page.evaluate("""async () => {
+        const scans = await (await fetch('/api/scans')).json();
+        return scans.find((s) => s.source_key === 'Rotated_0001');
+    }""")
+    page.locator(f'#scan-list li[data-id="{scan["id"]}"]').click()
+    expect(page.locator("#editor")).to_be_visible()
+    assert scan["front_rotation"] == scan["back_rotation"] == 270  # recovers the correction for a 90-degree feed
+    assert scan["suggestions"]["rotation_front"]["value"] == 270
+    assert scan["suggestions"]["rotation_back"]["value"] == 270
+
+    expect(page.locator("#front-rotation")).to_be_visible()
+    expect(page.locator("#front-rotation")).to_have_attribute("data-state", "suggested")
+    expect(page.locator("#back-rotation")).to_be_visible()
+    expect(page.locator("#back-rotation")).to_have_attribute("data-state", "suggested")
+
+    # The operator can still override either side manually - the escape hatch always works.
+    w, h = _natural_size(page, "#img-back")
+    page.locator('[data-rotate="back"][data-step="90"]').click()
+    page.wait_for_function(f"document.querySelector('#img-back').naturalWidth === {h}")
+    expect(page.locator("#back-rotation")).not_to_have_attribute("data-state", "suggested")
+    expect(page.locator("#front-rotation")).to_have_attribute("data-state", "suggested")  # front untouched
+
+
+@pytest.mark.parametrize("read_text", [True], indirect=True)
+def test_auto_rotate_chip_at_400px(browser, server):
+    pytest.importorskip("rapidocr_onnxruntime")
+    _write_sideways_scan(server["root"])
+    context = browser.new_context(viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    pg.click("#btn-ingest")
+    expect(toast(pg)).to_contain_text("Ingested 8 scan(s)", timeout=90000)
+    scan = pg.evaluate("""async () => {
+        const scans = await (await fetch('/api/scans')).json();
+        return scans.find((s) => s.source_key === 'Rotated_0001');
+    }""")
+    pg.locator(f'#scan-list li[data-id="{scan["id"]}"]').click()
+    expect(pg.locator("#editor")).to_be_visible()
+    expect(pg.locator("#front-rotation")).to_be_visible()
+    assert no_horizontal_scroll(pg), "auto-rotate chip causes horizontal scroll at 400px"
+    context.close()
+
+
+# ---------------------------------------------------------------- delete a rejected scan
+
+
+def test_delete_only_shows_for_rejected_and_removes_the_scan(page):
+    ingest(page)
+    page.locator("#scan-list li").first.click()
+    expect(page.locator("#btn-delete")).to_be_hidden()  # never offered during normal review
+
+    page.click("#btn-reject")
+    expect(toast(page)).to_contain_text("rejected")
+    page.locator(".tab", has_text="Rejected").click()
+    page.locator("#scan-list li").first.click()
+    expect(page.locator("#btn-delete")).to_be_visible()
+
+    page.click("#btn-delete")
+    expect(page.locator("#confirm-dialog")).to_be_visible()
+    page.click("#confirm-cancel")
+    expect(page.locator("#confirm-dialog")).to_be_hidden()
+    expect(page.locator("#scan-list li")).to_have_count(1)  # cancelling deletes nothing
+
+    page.click("#btn-delete")
+    page.click("#confirm-ok")
+    expect(toast(page)).to_contain_text("deleted permanently")
+    expect(page.locator("#empty-list")).to_be_visible()  # the only rejected scan is gone
+
+    page.locator(".tab", has_text="All").click()
+    expect(page.locator("#scan-list li")).to_have_count(6)  # 7 ingested, 1 deleted
+
+
+def test_delete_button_at_400px(browser, server):
+    context = browser.new_context(viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    ingest(pg)
+    pg.locator("#scan-list li").first.click()
+    pg.click("#btn-reject")
+    pg.locator(".tab", has_text="Rejected").click()
+    pg.locator("#scan-list li").first.click()
+    expect(pg.locator("#btn-delete")).to_be_visible()
+    pg.locator("#btn-delete").scroll_into_view_if_needed()
+    assert no_horizontal_scroll(pg), "delete button causes horizontal scroll at 400px"
+    context.close()
+
+
+# ---------------------------------------------------------------- Immich (read-only duplicate check)
+
+
+def test_immich_panel_settings_save_and_mask_round_trip(page):
+    page.click("#btn-immich")
+    expect(page.locator("#immich-panel")).to_be_visible()
+    expect(page.locator("#health-panel")).to_be_hidden()
+    expect(page.locator("#learning-panel")).to_be_hidden()
+
+    page.fill("#immich-url", "http://127.0.0.1:1")  # nothing listens here: fails fast, never hangs
+    page.fill("#immich-api-key", "supersecretkey1234")
+    page.fill("#immich-library-id", "lib-1")
+    page.check("#immich-enabled")
+    page.click("#btn-immich-save")
+    expect(page.locator("#immich-save-state")).to_have_text("Saved")
+    expect(page.locator("#immich-api-key")).to_have_value("")  # never redisplays what was typed
+    expect(page.locator("#immich-api-key")).to_have_attribute("placeholder", "•••• 1234")
+    assert "supersecretkey1234" not in page.content()
+
+    page.click("#btn-immich-close")
+    expect(page.locator("#immich-panel")).to_be_hidden()
+    page.click("#btn-immich")  # re-open: settings persisted server-side
+    expect(page.locator("#immich-url")).to_have_value("http://127.0.0.1:1")
+    expect(page.locator("#immich-enabled")).to_be_checked()
+    assert "supersecretkey1234" not in page.content()
+
+    page.click("#btn-immich-test")
+    expect(toast(page)).to_contain_text("Could not connect", timeout=10000)
+
+    # Leave it disabled again so other tests in this suite see the default (no network calls) state.
+    page.uncheck("#immich-enabled")
+    page.click("#btn-immich-save")
+
+
+def test_immich_panel_at_400px(browser, server):
+    context = browser.new_context(viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    pg.click("#btn-immich")
+    expect(pg.locator("#immich-panel")).to_be_visible()
+    assert no_horizontal_scroll(pg), "Immich panel causes horizontal scroll at 400px"
+    for selector in ("#immich-url", "#immich-api-key", "#immich-library-id", "#immich-enabled",
+                      "#btn-immich-test", "#btn-immich-save", "#btn-immich-check"):
+        pg.locator(selector).scroll_into_view_if_needed()
+        expect(pg.locator(selector)).to_be_visible()
+    context.close()
+
+
+def test_immich_chip_shows_only_for_a_flagged_scan_and_manual_flag_toggles_it(page):
+    ingest(page)
+    page.locator("#scan-list li").first.click()
+    expect(page.locator("#scan-immich-dup")).to_be_hidden()
+    expect(page.locator("#btn-flag-immich-dup")).to_have_attribute("aria-pressed", "false")
+
+    page.click("#btn-flag-immich-dup")
+    expect(toast(page)).to_contain_text("Flagged as already in Immich")
+    expect(page.locator("#scan-operator-immich-dup")).to_be_visible()
+    expect(page.locator("#btn-flag-immich-dup")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#btn-flag-immich-dup")).to_have_text("Unflag as in Immich")
+
+    page.click("#btn-flag-immich-dup")
+    expect(toast(page)).to_contain_text("Immich flag cleared")
+    expect(page.locator("#scan-operator-immich-dup")).to_be_hidden()
+
+
+def test_immich_check_button_disabled_until_enabled(page):
+    page.click("#btn-immich")
+    expect(page.locator("#btn-immich-check")).to_be_disabled()

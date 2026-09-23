@@ -21,7 +21,7 @@ class FakeReader:
         self.lines = [ocr.TextLine(text, score, [[0, 0], [1, 0], [1, 1], [0, 1]]) for text, score in lines]
         self.calls = 0
 
-    def read(self, image):
+    def read(self, image, use_cls: bool = True):
         self.calls += 1
         return self.lines
 

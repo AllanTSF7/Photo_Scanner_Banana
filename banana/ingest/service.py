@@ -15,6 +15,7 @@ from banana import core, imaging
 from banana.core import corrections, dictionary
 from banana.analysis import autocorrect, ocr
 from banana.analysis.date_parse import parse_best
+from banana.analysis.ocr import orientation
 from banana.analysis.entities import Entities, extract
 from banana.config import Settings
 from banana.ingest.pairing import pair_files
@@ -126,6 +127,49 @@ def analyze_scan(session: Session, scan: Scan, settings: Settings, *, detect_cro
     return scan
 
 
+def _reanchor_duplicate_group(session: Session, followers: list[Scan]) -> None:
+    """Re-point a group of scans that shared a now-gone anchor: promote a survivor, or clear it if there's
+    only one left (nothing left to call it a possible rescan of)."""
+    if len(followers) == 1:
+        followers[0].duplicate_group_id = None
+    else:
+        new_anchor, *rest = sorted(followers, key=lambda s: s.id)
+        new_anchor.duplicate_group_id = None  # the anchor itself never carries a duplicate_group_id
+        for follower in rest:
+            follower.duplicate_group_id = new_anchor.id
+    for follower in followers:
+        session.add(follower)
+
+
+def release_from_duplicate_group(session: Session, scan: Scan) -> None:
+    """Before deleting `scan`, re-point anything that named it as their duplicate-group anchor.
+
+    `duplicate_group_id` isn't a real foreign key (a scan can be deleted long after it's flagged others), so
+    without this a deleted scan's id would stay stuck in every follower's `duplicate_group_id` forever - the
+    UI would keep saying "possible rescan of #N" for an id that no longer exists.
+    """
+    followers = list(session.exec(select(Scan).where(Scan.duplicate_group_id == scan.id)))
+    if followers:
+        _reanchor_duplicate_group(session, followers)
+
+
+def repair_dangling_duplicate_groups(session: Session) -> int:
+    """Fix any `duplicate_group_id` left pointing at a scan that no longer exists - e.g. one deleted before
+    `release_from_duplicate_group` existed. Returns how many scans were changed. Safe to run any time; a no-op
+    when there's nothing dangling."""
+    existing_ids = set(session.exec(select(Scan.id)))
+    targets = {
+        gid for gid in session.exec(select(Scan.duplicate_group_id).where(Scan.duplicate_group_id.is_not(None)))
+        if gid not in existing_ids
+    }
+    changed = 0
+    for target in targets:
+        followers = list(session.exec(select(Scan).where(Scan.duplicate_group_id == target)))
+        _reanchor_duplicate_group(session, followers)
+        changed += len(followers)
+    return changed
+
+
 def known_entities(session: Session, exclude_id: int | None = None) -> Entities:
     """Every person, place and event already entered on other scans: the family's own vocabulary."""
     known = Entities()
@@ -172,6 +216,31 @@ def derive_entities(
             setattr(scan, name, getattr(found, name))
 
 
+def apply_orientation_suggestion(scan: Scan, settings: Settings, reader: ocr.Reader) -> None:
+    """Auto-rotate front and back to upright, from the back's OCR orientation (0/90/180/270 search).
+
+    Front and back share one physical duplex pass - the back is mirrored left-right relative to the front, not
+    independently rotated - so whichever rotation makes the back's text read upright is, in the ordinary case, the
+    front's correct rotation too. Runs at most once: skipped once anything (operator or this search) has already
+    decided a rotation, so it never overrides a manual choice and re-analyze/read-text keep their "rotations are
+    kept" contract for free. No back, blank back, or no legible text at any angle: no signal, nothing is guessed.
+    """
+    if not settings.analysis.orientation_search or not scan.back_path:
+        return
+    if scan.back_rotation or (scan.suggestions or {}).get("rotation_back"):
+        return
+    result = orientation.search(
+        reader, Path(scan.back_path), scan.back_crop, settings.analysis.orientation_search_max_side
+    )
+    if result.score <= 0.0:
+        return
+    producer = corrections.producers(settings)["rotation_auto"]
+    corrections.suggest(scan, "rotation_front", result.angle, producer, confidence=round(result.score, 3))
+    corrections.suggest(scan, "rotation_back", result.angle, producer, confidence=round(result.score, 3))
+    scan.front_rotation = result.angle
+    scan.back_rotation = result.angle
+
+
 def read_back_text(
     scan: Scan, settings: Settings, known: Entities | None = None,
     learned: dictionary.CorrectionDictionary | None = None,
@@ -181,6 +250,7 @@ def read_back_text(
     reader = ocr.get_reader()
     if reader is None or not scan.back_path:
         return None
+    apply_orientation_suggestion(scan, settings, reader)  # before building `edit`, so a fresh rotation takes effect
     produced = corrections.producers(settings)
     edit = imaging.Edit(_box(scan.back_crop), scan.back_rotation or 0)
     image = np.asarray(imaging.open_edited(Path(scan.back_path), edit, settings.analysis.ocr_max_side))

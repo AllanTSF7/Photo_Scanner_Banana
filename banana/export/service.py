@@ -99,8 +99,10 @@ def export_scan(session: Session, scan: Scan, exporter: Exporter) -> Export:
     previous = None
     if record is not None:
         previous = ExportResult(
-            PurePosixPath(record.front_rel), record.front_sha256,
-            PurePosixPath(record.back_rel) if record.back_rel else None, record.back_sha256,
+            front_rel=PurePosixPath(record.front_rel), front_sha256=record.front_sha256,
+            front_sha1=record.front_sha1 or "",
+            back_rel=PurePosixPath(record.back_rel) if record.back_rel else None, back_sha256=record.back_sha256,
+            back_sha1=record.back_sha1,
         )
 
     request = ExportRequest(
@@ -110,9 +112,12 @@ def export_scan(session: Session, scan: Scan, exporter: Exporter) -> Export:
     result = exporter.export(request, previous)
 
     record = record or Export(scan_id=scan.id, front_rel="", front_sha256="")
-    record.front_rel, record.front_sha256 = str(result.front_rel), result.front_sha256
+    record.front_rel, record.front_sha256, record.front_sha1 = str(result.front_rel), result.front_sha256, result.front_sha1
     record.back_rel = str(result.back_rel) if result.back_rel else None
     record.back_sha256 = result.back_sha256
+    record.back_sha1 = result.back_sha1
+    # A re-export changed the bytes (new checksums): the old Immich check result no longer applies.
+    record.immich_front_id = record.immich_back_id = record.immich_checked_at = None
     record.exported_at = utcnow()
     scan.status = ScanStatus.EXPORTED.value
     scan.updated_at = utcnow()

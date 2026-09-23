@@ -8,6 +8,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Literal
 
+import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -29,7 +30,11 @@ from banana.analysis import entities
 from banana.core import corrections, dictionary, proposals
 from banana.ingest.service import (
     analyze_scan, extract_for_scan, ingest_inbox, known_entities, read_back_text, record_entity_suggestions,
+    release_from_duplicate_group,
 )
+from banana.immich import settings as immich_settings
+from banana.immich.client import build_client
+from banana.immich.dedup import ImmichCheckController
 from banana.models import Batch, CorrectionEvent, Export, Scan, ScanStatus, SettingOverride, utcnow
 from banana.scanner import sane
 
@@ -46,6 +51,7 @@ app = FastAPI(
 )
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 scans = sane.ScanController(settings.scanner, settings.paths.inbox)
+immich_check = ImmichCheckController(engine, settings)
 
 # Demo password (e.g. for a temporary public tunnel): when BANANA_DEMO_PASSWORD is set, every request
 # (UI, API, images, docs) needs HTTP Basic auth with that password. Any username is accepted.
@@ -146,7 +152,7 @@ def scanner_status() -> dict:
     return {
         "configured": True, "host": cfg.host, "port": cfg.port, "online": sane.is_online(cfg),
         "device": cfg.device, "source": cfg.source, "mode": cfg.mode, "resolution": cfg.resolution,
-        "after_scan": cfg.after_scan, "duplex": cfg.duplex,
+        "after_scan": cfg.after_scan, "duplex": cfg.duplex, "max_feeder_count": cfg.max_feeder_count,
         "scan": scans.status(),
     }
 
@@ -185,6 +191,64 @@ def component_health() -> dict:
     return {"overall": health_checks.overall(checks), "checks": checks}
 
 
+class ImmichSettingsUpdate(BaseModel):
+    enabled: bool | None = None
+    url: str | None = None
+    library_id: str | None = None
+    import_path_prefix: str | None = None
+    api_key: str | None = None  # omitted = unchanged; "" explicitly clears it
+
+
+@app.get("/api/immich/settings", tags=["immich"])
+def get_immich_settings(session: Session = Depends(get_session)) -> dict:
+    """Never returns the raw API key - just whether one is set and its last 4 characters."""
+    return immich_settings.get_masked(session, settings)
+
+
+@app.patch("/api/immich/settings", tags=["immich"])
+def update_immich_settings(body: ImmichSettingsUpdate, session: Session = Depends(get_session)) -> dict:
+    return immich_settings.save(
+        session, settings, enabled=body.enabled, url=body.url, library_id=body.library_id,
+        import_path_prefix=body.import_path_prefix, api_key=body.api_key,
+    )
+
+
+@app.get("/api/immich/status", tags=["immich"])
+def immich_status(session: Session = Depends(get_session)) -> dict:
+    """A live, read-only probe - separate from and cheaper than the full duplicate check. Makes no network
+    call at all when Immich checking isn't enabled."""
+    cfg = immich_settings.get_effective(session, settings)
+    if not cfg.enabled:
+        return {"enabled": False, "connected": False, "asset_count": None, "error": None}
+    client = build_client(cfg)
+    try:
+        stats = client.statistics()
+        count = stats.get("images") if isinstance(stats, dict) else None
+        return {"enabled": True, "connected": True, "asset_count": count, "error": None}
+    except httpx.HTTPStatusError as exc:
+        error = f"HTTP {exc.response.status_code} - check the API key/library id"
+        return {"enabled": True, "connected": False, "asset_count": None, "error": error}
+    except httpx.HTTPError as exc:
+        return {"enabled": True, "connected": False, "asset_count": None, "error": f"Could not connect: {exc}"}
+    finally:
+        client.close()
+
+
+@app.post("/api/immich/check", tags=["immich"])
+def start_immich_check() -> dict:
+    """Kick off the read-only duplicate check (exact-checksum + perceptual) in the background. Operator-
+    triggered only - never automatic on ingest."""
+    try:
+        return immich_check.start()
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+
+
+@app.get("/api/immich/check/status", tags=["immich"])
+def immich_check_status() -> dict:
+    return immich_check.status()
+
+
 @app.get("/api/scanner/scan", tags=["scanner"])
 def scan_progress() -> dict:
     """State of the current or last scan: idle | scanning | done | failed, pages so far, message, ingest result."""
@@ -219,6 +283,7 @@ class ScanUpdate(BaseModel):
     front_rotation: Literal[0, 90, 180, 270] | None = None
     back_rotation: Literal[0, 90, 180, 270] | None = None
     operator_duplicate: bool | None = None
+    operator_immich_duplicate: bool | None = None
 
 
 @app.patch("/api/scans/{scan_id}", tags=["scans"])
@@ -240,7 +305,7 @@ def update_scan(scan_id: int, body: ScanUpdate, session: Session = Depends(get_s
             scan.set_photo_date(found[0].date, "manual")
     for name in (
         "description", "people", "places", "events", "tags", "keep_back", "status",
-        "front_rotation", "back_rotation", "operator_duplicate",
+        "front_rotation", "back_rotation", "operator_duplicate", "operator_immich_duplicate",
     ):
         value = getattr(body, name)
         if value is not None:
@@ -258,6 +323,34 @@ def update_scan(scan_id: int, body: ScanUpdate, session: Session = Depends(get_s
     if recorded is not None:
         data["corrections_recorded"] = recorded
     return data
+
+
+@app.delete("/api/scans/{scan_id}", tags=["scans"])
+def delete_scan(scan_id: int, session: Session = Depends(get_session)) -> dict:
+    """Permanently remove a rejected scan's original files and its record. Never reachable during normal
+    review - only for a scan already rejected, with no export and no correction-event (training) history, so
+    this can never discard data the learning loop depends on."""
+    scan = _get_scan(session, scan_id)
+    if scan.status != ScanStatus.REJECTED.value:
+        raise HTTPException(409, "only a rejected scan can be deleted")
+    if session.exec(select(Export).where(Export.scan_id == scan_id)).first():
+        raise HTTPException(409, "this scan was already exported; remove the exported copy separately")
+    if session.exec(select(CorrectionEvent).where(CorrectionEvent.scan_id == scan_id)).first():
+        raise HTTPException(409, "this scan has correction history used for training and can't be deleted")
+
+    release_from_duplicate_group(session, scan)  # never leave another scan's "possible rescan of #N" dangling
+    removed = []
+    for value in {scan.front_path, scan.back_path, scan.front_enhanced_path}:
+        if not value:
+            continue
+        try:
+            Path(value).unlink()
+            removed.append(Path(value).name)
+        except FileNotFoundError:
+            pass
+    session.delete(scan)
+    session.commit()
+    return {"deleted": scan_id, "files_removed": removed}
 
 
 class OcrLineUpdate(BaseModel):

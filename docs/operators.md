@@ -57,16 +57,20 @@ and dropped later, so duplex is always on.
 
 ### Step 1: Scan
 1. Load a stack of photos into the feeder, following the scanner's loading guide.
-   Keep photos of similar size together and don't overload the feeder.
-2. Choose **Feed**: **Whole stack** scans until the feeder is empty. **One photo** scans a single photo (front and back),
-   which is handy for testing or rescanning one print. The button then reads **Scan one photo**.
+   Keep photos of similar size together and don't overload the feeder. **Whole stack** stops on its own at
+   36 photos even if more are loaded, so the hopper is never pushed past what it's rated for - if you have
+   more than that, scan in batches of up to 36.
+2. Choose **Feed**: **Whole stack** scans until the feeder is empty (or the 36-photo cap). **One photo** scans a
+   single photo (front and back), which is handy for testing or rescanning one print. The button then reads
+   **Scan one photo**.
 3. Choose **After scan**:
    - **Add to review queue** (usual): photos go straight into **To review** when the scan finishes.
    - **Leave in inbox**: files are only saved into the inbox folder. Click **Ingest inbox** when you want to review them.
    The page remembers your choice.
-4. Click **Scan feeder**. The top bar shows **Scanning, N pages**, then **Processing N pages**.
+4. Click **Scan feeder**. The top bar shows **Scanning, N photos**, then **Processing N photos**.
 5. When the feeder is empty you see a message like "Scanned 10 photo(s), 20 page(s). Ingested 10 scan(s)"
-   (or "…20 file(s) left in the inbox").
+   (or "…20 file(s) left in the inbox"). If it stops at "feeder capped at 36, scan again for more," load the
+   rest and click **Scan feeder** again - nothing from the first batch is lost.
 
 Each photo becomes one front and one back (duplex). A message about an "odd page count" means the last photo
 has no back image. Check that photo.
@@ -138,6 +142,11 @@ there's enough evidence (for example, when to call a back "blank"). They change 
 **Revert** undoes them.
 
 **Fix the images** (these never change the original scan; they're applied when exporting):
+- **Auto-rotate:** when the back has readable text, the app usually straightens the photo for you - both the front
+  and the back come out upright without you touching Rotate. You'll see an **auto-rotated** chip next to whichever
+  side it adjusted; it's dashed like any other suggestion until you approve the scan. If it guessed wrong (rare -
+  it only rotates when it's confident), fix it with Rotate exactly as before. No back, a blank back, or writing
+  it can't read at all: nothing is guessed, and rotation stays manual for that scan.
 - **Rotate left / Rotate right** under the front or back image. Scans come out in whatever direction the photo was fed,
   so upside-down or sideways photos are normal. <kbd>R</kbd> rotates the front right, <kbd>Shift</kbd>+<kbd>R</kbd> left.
 - **Swap front/back** (top right of the scan) when the picture shows up as the back.
@@ -146,10 +155,17 @@ there's enough evidence (for example, when to call a back "blank"). They change 
 **Then decide:**
 - **Approve** (<kbd>A</kbd>): the photo is ready to export. The next photo opens.
 - **Reject** (<kbd>X</kbd>): the photo won't be exported. Use this for rescans and failed or blurry scans.
-  The original stays in the archive.
+  The original stays in the archive - rejecting never deletes anything.
 - **Save** (<kbd>Ctrl</kbd>+<kbd>S</kbd>): keep your edits and decide later.
 
 Switching photos saves your edits automatically.
+
+**Deleting a rejected photo for good:** open the **Rejected** tab and select it - a **Delete permanently**
+button appears there (nowhere else). It asks you to confirm, then removes the original front/back files from
+the archive and the record itself; there's no undo. It's refused if the photo was ever approved (even briefly)
+or already exported, since that scan may carry corrections the learning loop depends on. Most rejects
+(duplicates, misfeeds, blurry scans) are fine to delete; when in doubt, just leave it rejected - it costs
+nothing to keep.
 
 ### Step 4: Export
 Click **Export approved**. Approved photos move to the **Exported** tab, and the form shows where
@@ -202,7 +218,34 @@ A smarter comparison is planned.
 
 ---
 
-## 6. Tags in Immich
+## 6. Checking Immich for duplicates
+
+An optional, separate check: "have I already scanned and imported this photo into Immich?" It's off until you
+turn it on, and it only ever **reads** from Immich - it never uploads, edits, stacks, or triggers a library scan
+there.
+
+**Turning it on:** open the **Immich** button in the top bar, fill in your Immich server URL, an API key
+(*Immich → Account Settings → API Keys*), and the External Library's ID, then tick **Enabled** and **Save**.
+Use **Test connection** to check the details work before relying on it. The key is never shown again once
+saved - only its last 4 characters, so you can tell which key is in use.
+
+**Running it:** click **Check Immich for duplicates**. It runs in the background (you can keep reviewing while
+it works) and does two things:
+- Checks whether the exact file you already **exported** matches something already in Immich (byte-for-byte).
+- Compares every scan's photo against thumbnails already in your Immich library, the same "looks similar" check
+  used for local rescans (see section 5), just pointed at your Immich library instead.
+
+A match shows as an **in Immich?** chip on that scan, dashed until you confirm or clear it with the flag button
+next to it - the same kept/removed/added pattern as **Flag duplicate**.
+
+**What it can't do:** it can't tell you a photo is a duplicate before you've exported it (export changes the
+file, so only the exported copy can ever match byte-for-byte), and it can't ask Immich "have you seen anything
+like this?" directly - Immich has no such feature, so the "looks similar" half of the check is computed here,
+not by Immich.
+
+---
+
+## 7. Tags in Immich
 
 What you enter becomes these Immich tags:
 
@@ -220,7 +263,7 @@ A `/` inside a name is changed to `-`, because `/` separates tag levels.
 
 ---
 
-## 7. Do and don't
+## 8. Do and don't
 
 **Do**
 - Finish scanning a stack before you ingest it.
@@ -234,7 +277,7 @@ A `/` inside a name is changed to `-`, because `/` separates tag levels.
 
 ---
 
-## 8. Keyboard shortcuts
+## 9. Keyboard shortcuts
 
 | Key | Action |
 |---|---|

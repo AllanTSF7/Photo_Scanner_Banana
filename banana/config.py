@@ -30,6 +30,8 @@ class AnalysisConfig(BaseModel):
     read_text: bool = True  # OCR photo backs during ingest/re-analyze (needs the "ocr" extra)
     ocr_max_side: int = 1800  # long side of the image given to OCR
     derive_entities: bool = True  # fill empty People/Places/Events from the description (needs the "ner" extra for NER)
+    orientation_search: bool = True  # auto-rotate front+back from the back's OCR orientation (needs the "ocr" extra)
+    orientation_search_max_side: int = 300  # long side per rotation tried; small and cheap, tried up to 4x
 
 
 class DatesConfig(BaseModel):
@@ -48,6 +50,7 @@ class ScannerConfig(BaseModel):
     auto_crop: bool = True
     skew_correction: bool = True
     timeout_seconds: int = 3600
+    max_feeder_count: int = 36  # the FF-680W ADF hopper's measured capacity; caps "Whole stack" so it can't jam past it
     after_scan: Literal["review", "inbox"] = "review"  # default destination; the UI can choose per scan
     # Which side of each duplex pair SANE delivers first. The FF-680W (photos loaded face down) reads the back first.
     first_side: Literal["front", "back"] = "back"
@@ -66,6 +69,9 @@ class ExifToolConfig(BaseModel):
 
 
 class ImmichConfig(BaseModel):
+    # Hard opt-in: filling in url/api_key alone must never start any network activity. The operator-saved
+    # ImmichSetting DB row (banana/immich/settings.py) overrides all of this once anything has been saved there.
+    enabled: bool = False
     url: str = ""
     api_key: str = ""
     library_id: str = ""

@@ -26,7 +26,7 @@ class TextLine:
 class Reader(Protocol):
     name: str
 
-    def read(self, image: np.ndarray) -> list[TextLine]: ...
+    def read(self, image: np.ndarray, use_cls: bool = True) -> list[TextLine]: ...
 
 
 class RapidOcrReader:
@@ -38,9 +38,11 @@ class RapidOcrReader:
         self._engine = RapidOCR()
         self._lock = threading.Lock()  # the ONNX sessions aren't shared across concurrent calls
 
-    def read(self, image: np.ndarray) -> list[TextLine]:
+    def read(self, image: np.ndarray, use_cls: bool = True) -> list[TextLine]:
+        """use_cls=False skips the built-in upside-down classifier - used by orientation search, which needs
+        recognition to fail on upside-down text rather than have it silently corrected."""
         with self._lock:
-            result, _ = self._engine(image)
+            result, _ = self._engine(image, use_cls=use_cls)
         lines = []
         for box, text, score in result or []:
             text = str(text).strip()

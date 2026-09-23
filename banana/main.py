@@ -45,6 +45,20 @@ def export(
             typer.echo(f"SCAN {scan.id:06d}: {record.front_rel}" + (f" + {record.back_rel}" if record.back_rel else ""))
 
 
+@cli.command("repair-duplicates")
+def repair_duplicates(config: Path | None = typer.Option(None)) -> None:
+    """Fix any `duplicate_group_id` left pointing at a deleted scan (e.g. from before this repair existed).
+    Safe to run any time; a no-op when there's nothing dangling."""
+    from banana.ingest.service import repair_dangling_duplicate_groups
+
+    settings = load_settings(config)
+    engine = db.make_engine(settings.db_path)
+    with db.session(engine) as session:
+        changed = repair_dangling_duplicate_groups(session)
+        session.commit()
+    typer.echo(f"{changed} scan(s) repaired" if changed else "nothing to repair")
+
+
 @cli.command()
 def serve(host: str = "0.0.0.0", port: int = 8000) -> None:
     import uvicorn

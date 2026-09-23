@@ -107,6 +107,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!$("health-panel").hidden) toggleHealth(false);
     if (!$("learning-panel").hidden) toggleLearning(false);
+    if (!$("immich-panel").hidden) toggleImmich(false);
     return;
   }
   const parts = [];
@@ -320,6 +321,7 @@ async function loadList() {
             <span>${s.date.precision === "unknown" ? "no date" : escapeHtml(s.date.label)}</span>
             ${state.status ? "" : `<span class="chip status ${s.status}">${statusLabel(s.status)}</span>`}
             ${s.duplicate_group_id || s.operator_duplicate ? `<span class="chip warn">dup?</span>` : ""}
+            ${s.immich_duplicate_asset_id || s.operator_immich_duplicate ? `<span class="chip warn">in Immich?</span>` : ""}
             ${s.back_type === "content" ? `<span class="chip">back text</span>` : ""}
           </div>
         </div>`;
@@ -410,11 +412,19 @@ function showEditor(scan, { full = false } = {}) {
   $("scan-operator-dup").hidden = !scan.operator_duplicate;
   $("btn-flag-dup").setAttribute("aria-pressed", String(!!scan.operator_duplicate));
   $("btn-flag-dup").firstChild.textContent = scan.operator_duplicate ? "Unflag duplicate" : "Flag duplicate";
+  $("scan-immich-dup").hidden = !scan.immich_duplicate_asset_id;
+  setSuggested($("scan-immich-dup"), !!scan.immich_duplicate_asset_id && !committed);
+  $("scan-operator-immich-dup").hidden = !scan.operator_immich_duplicate;
+  $("btn-flag-immich-dup").setAttribute("aria-pressed", String(!!scan.operator_immich_duplicate));
+  $("btn-flag-immich-dup").firstChild.textContent = scan.operator_immich_duplicate ? "Unflag as in Immich" : "Flag as in Immich";
 
   const version = encodeURIComponent(scan.updated_at);
   setFrameImage("front", `/api/scans/${scan.id}/image/front?v=${version}`);
   $("front-crop").textContent = scan.front_crop ? "cropped" : "full page";
   setSuggested($("front-crop"), !committed && sug.crop_front !== undefined && sameValue(sug.crop_front.value, scan.front_crop));
+  // Only shown when a rotation was actually applied (0 means "already upright", nothing to flag).
+  $("front-rotation").hidden = !(sug.rotation_front && sug.rotation_front.value);
+  setSuggested($("front-rotation"), !committed && sug.rotation_front && sug.rotation_front.value === scan.front_rotation);
   $("btn-swap").disabled = !scan.has_back;
   document.querySelectorAll('[data-rotate="back"]').forEach((b) => (b.disabled = !scan.has_back));
   const noBack = $("frame-back").querySelector(".no-back");
@@ -431,6 +441,8 @@ function showEditor(scan, { full = false } = {}) {
   $("back-type").textContent = scan.back_type ? (scan.back_type === "blank" ? "looks blank" : "has writing") : "";
   $("back-type").hidden = !scan.back_type;
   setSuggested($("back-type"), !committed && sug.blank_back !== undefined && sug.blank_back.value === scan.back_type);
+  $("back-rotation").hidden = !(sug.rotation_back && sug.rotation_back.value);
+  setSuggested($("back-rotation"), !committed && sug.rotation_back && sug.rotation_back.value === scan.back_rotation);
   $("keep-back").checked = scan.keep_back;
   $("keep-back").disabled = !scan.has_back;
   $("fig-back").classList.toggle("dropped", scan.has_back && !scan.keep_back);
@@ -459,6 +471,8 @@ function showEditor(scan, { full = false } = {}) {
   const info = $("export-info");
   info.hidden = !scan.export;
   if (scan.export) info.textContent = `Exported to ${scan.export.front_rel}${scan.export.back_rel ? `  and  ${scan.export.back_rel}` : ""}`;
+  // Delete is only ever offered for a scan already rejected - never reachable from the normal review flow.
+  $("btn-delete").hidden = scan.status !== "rejected";
   if (!refreshing) markDirty(false);
   scheduleDerive(0);
 }
@@ -772,6 +786,12 @@ $("btn-flag-dup").onclick = () => applyScanAction(async () => {
   toast(flagged ? "Flagged as duplicate" : "Duplicate flag cleared");
   return scan;
 });
+$("btn-flag-immich-dup").onclick = () => applyScanAction(async () => {
+  const flagged = !state.current?.operator_immich_duplicate;
+  const scan = await save({ operator_immich_duplicate: flagged });
+  toast(flagged ? "Flagged as already in Immich" : "Immich flag cleared");
+  return scan;
+});
 $("btn-swap").onclick = () => applyScanAction(async () => {
   await save();
   return api("POST", `/api/scans/${state.selectedId}/swap-sides`);
@@ -787,6 +807,29 @@ $("btn-read-text").onclick = () => withButton($("btn-read-text"), () => applySca
 }, "Text read from the back"));
 $("btn-approve").onclick = () => setStatus("approved");
 $("btn-reject").onclick = () => setStatus("rejected");
+
+async function deleteScan() {
+  if (state.selectedId == null) return;
+  const id = state.selectedId;
+  const currentIndex = state.scans.findIndex((s) => s.id === id);
+  const ok = await confirmAction({
+    title: `Delete scan #${String(id).padStart(6, "0")} permanently?`,
+    body: "Removes the original front and back files from the archive, and this record. The scan won't come back.",
+    confirmLabel: "Delete permanently",
+  });
+  if (!ok) return;
+  try {
+    await api("DELETE", `/api/scans/${id}`);
+    toast(`#${String(id).padStart(6, "0")} deleted permanently`);
+    await refresh();
+    const next = state.scans[Math.min(currentIndex, state.scans.length - 1)]?.id;
+    if (next != null) await selectScan(next, true, true); // full render, selection never cleared
+    else showEditor(null);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
+$("btn-delete").onclick = () => withButton($("btn-delete"), deleteScan);
 
 // ---------- pipeline ----------
 $("btn-ingest").onclick = () => withButton($("btn-ingest"), async () => {
@@ -959,6 +1002,7 @@ function toggleHealth(open = $("health-panel").hidden) {
   $("btn-health").setAttribute("aria-expanded", String(open));
   if (open) {
     toggleLearning(false);
+    toggleImmich(false);
     panelSkeleton($("health-list"), lastHealthRows);
     loadHealth();
   }
@@ -1087,6 +1131,7 @@ function toggleLearning(open = $("learning-panel").hidden) {
   $("btn-learning").setAttribute("aria-expanded", String(open));
   if (open) {
     toggleHealth(false);
+    toggleImmich(false);
     panelSkeleton($("proposal-list"), 2);
     loadLearning();
   }
@@ -1094,6 +1139,87 @@ function toggleLearning(open = $("learning-panel").hidden) {
 $("btn-learning").onclick = () => toggleLearning();
 $("btn-learning-close").onclick = () => toggleLearning(false);
 $("btn-learning-refresh").onclick = () => withButton($("btn-learning-refresh"), loadLearning);
+
+// ---------- Immich (read-only duplicate check) ----------
+function toggleImmich(open = $("immich-panel").hidden) {
+  $("immich-panel").hidden = !open;
+  $("btn-immich").setAttribute("aria-expanded", String(open));
+  if (open) {
+    toggleHealth(false);
+    toggleLearning(false);
+    loadImmichSettings();
+  }
+}
+$("btn-immich").onclick = () => toggleImmich();
+$("btn-immich-close").onclick = () => toggleImmich(false);
+
+async function loadImmichSettings() {
+  const s = await api("GET", "/api/immich/settings");
+  $("immich-url").value = s.url;
+  $("immich-library-id").value = s.library_id;
+  $("immich-enabled").checked = s.enabled;
+  $("immich-api-key").value = "";
+  $("immich-api-key").placeholder = s.api_key_set ? `•••• ${s.api_key_last4}` : "paste a new key to change it";
+  $("immich-key-state").textContent = s.api_key_set ? "A key is saved. Leave blank to keep it." : "No key saved yet.";
+  renderImmichConnection(s);
+}
+
+function renderImmichConnection(s) {
+  $("immich-connection").textContent = s.enabled ? "Enabled" : "Disabled - turn on Enabled and save to check";
+  $("btn-immich-check").disabled = !s.enabled;
+}
+
+$("immich-settings-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = {
+    enabled: $("immich-enabled").checked,
+    url: $("immich-url").value.trim(),
+    library_id: $("immich-library-id").value.trim(),
+  };
+  if ($("immich-api-key").value) body.api_key = $("immich-api-key").value;
+  try {
+    const saved = await api("PATCH", "/api/immich/settings", body);
+    $("immich-save-state").textContent = "Saved";
+    setTimeout(() => ($("immich-save-state").textContent = ""), 2000);
+    await loadImmichSettings();
+    renderImmichConnection(saved);
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+$("btn-immich-test").onclick = () => withButton($("btn-immich-test"), async () => {
+  const status = await api("GET", "/api/immich/status");
+  if (!status.enabled) toast("Turn on Enabled and save first");
+  else if (status.connected) toast(`Connected${status.asset_count != null ? ` – ${status.asset_count} asset(s)` : ""}`);
+  else toast(status.error || "Could not connect", true);
+});
+
+let immichCheckPoll = null;
+$("btn-immich-check").onclick = () => withButton($("btn-immich-check"), async () => {
+  const ok = await confirmAction({
+    title: "Check Immich for duplicates?",
+    body: "Contacts your Immich server (read-only) to compare exported scans and library photos. This can take a while for a large library.",
+    confirmLabel: "Check now",
+  });
+  if (!ok) return;
+  try {
+    await api("POST", "/api/immich/check");
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
+  clearInterval(immichCheckPoll);
+  immichCheckPoll = setInterval(async () => {
+    const status = await api("GET", "/api/immich/check/status");
+    $("immich-check-message").textContent = status.message || (status.state === "running" ? "Checking…" : "");
+    if (status.state !== "running") {
+      clearInterval(immichCheckPoll);
+      if (status.state === "done") { toast("Immich check finished"); await refresh(); }
+      else if (status.state === "failed") toast(status.message || "Immich check failed", true);
+    }
+  }, 1000);
+});
 
 // ---------- dev live reload (only when the server runs with BANANA_DEV_RELOAD=1) ----------
 (async function devReload() {

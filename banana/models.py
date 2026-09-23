@@ -71,6 +71,11 @@ class Scan(SQLModel, table=True):
     status: str = Field(default=ScanStatus.INGESTED.value, index=True)
     duplicate_group_id: int | None = Field(default=None, index=True)
     operator_duplicate: bool = False  # operator says this scan is a duplicate (Flag duplicate)
+    # A separate signal from duplicate_group_id (a *local* rescan of another Scan row): this is "matches
+    # something already in the configured Immich library" (banana/immich/dedup.py). Never auto-applied - only
+    # ever a suggestion, like everything else, and never conflated with the local-duplicate bookkeeping.
+    immich_duplicate_asset_id: str | None = Field(default=None, index=True)
+    operator_immich_duplicate: bool = False
     is_keeper: bool = True
 
     created_at: datetime = Field(default_factory=utcnow)
@@ -111,7 +116,7 @@ class CorrectionEvent(SQLModel, table=True):
     batch: str | None = None
     approval_id: str = Field(index=True)  # groups the events written by one approval
     created_at: datetime = Field(default_factory=utcnow)
-    field: str = Field(index=True)  # ocr_line | person | place | event | date | rotation | crop | pairing | duplicate | blank_back
+    field: str = Field(index=True)  # ocr_line | person | place | event | date | rotation | crop | pairing | duplicate | blank_back | immich_duplicate
     action: str  # kept | edited | removed | added
     suggested: dict | list | str | int | None = Field(default=None, sa_column=Column(JSON))
     approved: dict | list | str | int | None = Field(default=None, sa_column=Column(JSON))
@@ -136,9 +141,40 @@ class Export(SQLModel, table=True):
     scan_id: int = Field(foreign_key="scan.id", unique=True)
     front_rel: str
     front_sha256: str
+    front_sha1: str | None = None  # what Immich's bulk-upload-check compares by (it hashes with SHA1, not 256)
     back_rel: str | None = None
     back_sha256: str | None = None
+    back_sha1: str | None = None
     exported_at: datetime = Field(default_factory=utcnow)
-    immich_front_id: str | None = None
+    immich_front_id: str | None = None  # set once bulk-upload-check confirms this exact file reached Immich
     immich_back_id: str | None = None
+    immich_checked_at: datetime | None = None  # distinguishes "never checked" from "checked, no match"
     stack_id: str | None = None
+
+
+class ImmichSetting(SQLModel, table=True):
+    """Operator-entered Immich connection, layered over config.toml's [immich] block. Singleton row (id=1).
+    Not SettingOverride: that table is shaped for one learning-loop threshold with a revert, and is dumped
+    unmasked by GET /api/learning - reusing it here would leak the API key through an unrelated endpoint."""
+
+    __tablename__ = "immich_setting"
+
+    id: int = Field(default=1, primary_key=True)
+    enabled: bool = False
+    url: str | None = None
+    api_key: str | None = None
+    library_id: str | None = None
+    import_path_prefix: str | None = None
+    updated_at: datetime = Field(default_factory=utcnow)
+
+
+class ImmichAssetHash(SQLModel, table=True):
+    """One cached dHash per Immich asset (banana/immich/dedup.py), keyed by Immich's own reported checksum so
+    a re-run only re-fetches/re-hashes assets that actually changed."""
+
+    __tablename__ = "immich_asset_hash"
+
+    asset_id: str = Field(primary_key=True)
+    checksum: str | None = None
+    dhash_hex: str | None = None
+    fetched_at: datetime = Field(default_factory=utcnow)

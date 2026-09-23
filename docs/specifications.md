@@ -81,9 +81,22 @@ Renames, type changes and drops aren't migrated.
 ingested ─► analyzed ─► needs_review ─► approved ─► exported ─► stacked
                               │   ▲         │
                               ▼   └─────────┘  (UI can move between needs_review/approved/rejected)
-                           rejected
+                           rejected ─► (deleted, see below)
 ```
 v0.1: ingest creates scans directly in `needs_review`. `ingested`, `analyzed` and `stacked` are reserved.
+
+**Deleting a rejected scan [implemented]** (`DELETE /api/scans/{id}`): rejection itself never deletes anything -
+originals stay in `archive/<batch>/` exactly like every other status, and the button (`#btn-delete`) only appears
+once a scan is already `rejected`, never during normal review. Deletion is refused (409) unless **all** of: the
+scan is `rejected`, it has no `export` row, and it has no `correction_event` rows (i.e. it was never approved,
+even briefly, before being rejected - that history is training data and is never discarded). On success, the
+front/back/enhanced files are unlinked and the `scan` row is removed.
+
+`duplicate_group_id` isn't a real foreign key (`banana/models.py`), so before removal
+`release_from_duplicate_group` (`banana/ingest/service.py`) re-points any other scan that named this one as
+its duplicate-group anchor - to a promoted survivor if more than one remains, or clears it if this was the only
+one, so nothing is ever left saying "possible rescan of #N" for an id that no longer exists. `banana
+repair-duplicates` fixes any such reference left dangling from before this existed.
 
 ### Tables
 
@@ -106,12 +119,26 @@ v0.1: ingest creates scans directly in `needs_review`. `ingested`, `analyzed` an
 | `status` | str | see status machine |
 | `duplicate_group_id` | int? | id of the first scan in the similar group |
 | `is_keeper` | bool | reserved for the duplicate resolver |
+| `immich_duplicate_asset_id` | str? | **[implemented]** Immich asset id our dHash matched against, if any - separate from local `duplicate_group_id` |
+| `operator_immich_duplicate` | bool | **[implemented]** operator's confirm/override of the Immich-duplicate suggestion |
 | `created_at`, `updated_at` | datetime (UTC) | |
 
 **job**: `id`, `type`, `scan_id`, `state` (`queued|running|done|failed`), `attempts` (max 3), `error`, timestamps
 
 **export**: `scan_id` (unique), `front_rel`, `front_sha256`, `back_rel`, `back_sha256`, `exported_at`,
-`immich_front_id`, `immich_back_id`, `stack_id` (the last three are **[planned]**)
+`front_sha1`, `back_sha1` **[implemented]** (SHA1 alongside the SHA256, for Immich's `bulk-upload-check`; not a
+security hash - `usedforsecurity=False`), `immich_front_id`, `immich_back_id`, `immich_checked_at`
+**[implemented]** (asset ids from an exact-checksum match, and when that check last ran; reset to `None` on
+every re-export since the bytes - and therefore the checksums - changed), `stack_id` **[planned]**
+
+**immich_setting** (singleton, `id=1`) **[implemented]**: `enabled`, `url`, `api_key`, `library_id`,
+`import_path_prefix`, `updated_at` - overrides `config.toml`'s `[immich]` block once the operator has saved
+anything through the UI. The API key is never returned by any endpoint; only `api_key_set` and its last 4
+characters are.
+
+**immich_asset_hash** (`asset_id` PK) **[implemented]**: `checksum`, `dhash_hex`, `fetched_at` - one cached
+perceptual hash per Immich asset, keyed by Immich's own reported checksum so a re-run only re-fetches assets
+that actually changed.
 
 ---
 
@@ -163,7 +190,12 @@ v0.1: ingest creates scans directly in `needs_review`. `ingested`, `analyzed` an
 - Content orientation depends on how each photo was placed; SANE applies no rotation and writes no EXIF orientation.
 
 ### Count
-`count: "all"` scans until the feeder is empty. `count: "one"` adds `--batch-count=2` (duplex) or `1`.
+`count: "all"` scans until the feeder is empty, capped at `scanner.max_feeder_count` (default 36, the FF-680W ADF
+hopper's measured capacity) photos - `--batch-count={max_feeder_count * (2 if duplex else 1)}`. This is a ceiling,
+not a forced count: `scanimage`'s own out-of-documents detection still stops early on a smaller stack, so nothing
+changes for a normal-sized batch. If a run hits the cap exactly, the finished message adds "feeder capped at N,
+scan again for more" so the operator knows to run **Scan feeder** again for the rest of a larger stack rather than
+overloading the hopper in one pass. `count: "one"` adds `--batch-count=2` (duplex) or `1`.
 
 `ScanRun.pages` (polled by `GET /api/scanner/scan`) is a raw SANE page count - two pages per duplex photo. The
 finished-scan message already converts this to photos (`photos = (pages + 1) // 2` when duplex); the **live**
@@ -189,7 +221,48 @@ also returns `duplex`), so a photo mid-scan is never counted as two while its ba
 - **Analysis** (dHash, blank-back metrics) runs on the cropped image.
 - **Swap sides** exchanges paths, crops and rotations and re-runs the checks without re-detecting crops.
   **Re-analyze** re-detects crops and keeps rotations.
-- **[planned]** Automatic rotation (text direction on backs, faces/DINOv3 on fronts), deskew.
+- **[implemented] Automatic rotation, front + back** (`banana/analysis/ocr/orientation.py`,
+  `apply_orientation_suggestion` in `banana/ingest/service.py`) - see 4d-3. **[planned]** deskew.
+
+## 4d-3. Auto-rotate (front + back come out upright)
+
+**[implemented]** `banana/analysis/ocr/orientation.py`, `apply_orientation_suggestion` in `banana/ingest/service.py`
+
+Front and back of one photo are captured in the **same duplex pass**: the back is mirrored left-right relative
+to the front, not independently rotated, so whichever rotation makes the back's text read upright is, in the
+ordinary case (a label written the same way up as the photo displays), also the front's correct rotation. One
+detected angle is applied as a suggestion to **both** `front_rotation` and `back_rotation`. No back, a blank
+back, or no legible text at any angle: no signal, and none is guessed - front-only orientation (faces, horizon)
+is out of scope; there's no reliable offline signal for it.
+
+**Why a single OCR-confidence score per rotation doesn't work** (measured, not assumed): RapidOCR (PP-OCR) is
+already close to rotation-invariant for *reading* text - its detector finds a line wherever it's turned, a
+hard-coded step in the library re-rotates any detected crop that comes out taller than wide before recognition,
+and its angle classifier auto-corrects upside-down text within its own line. Scoring recognition confidence at
+each of the 4 rotations gave near-identical scores at every angle in testing - genuinely no signal there.
+
+**Two-phase search** (`orientation.search`), each phase requiring a clear margin or returning "no signal":
+1. **Line shape** picks the axis. A detected line's bounding box (in the *un-rotated-by-RapidOCR* image
+   coordinates) is wide when text runs normally along the candidate rotation, narrow when it's off by 90°- real
+   lines are wide, not tall. Compares the two widest-scoring rotations against the two narrowest.
+2. **Recognition with the angle classifier off** (`reader.read(image, use_cls=False)`) picks the direction
+   within the winning axis. Without that auto-correction, recognition reads confidently right-side up and
+   produces little to nothing upside down (measured: full recognition at the correct angle, nothing at its
+   180° opposite).
+
+Runs once per scan: skipped once anything (operator or this search) has already decided a rotation, so it never
+overrides a manual choice, and **Swap sides** / **Re-analyze** keep their "rotations are kept" contract for
+free. The search itself runs at `analysis.orientation_search_max_side` (default 300px, small and cheap - up to
+6 OCR passes) before the real full-resolution OCR pass runs once at `analysis.ocr_max_side`.
+
+Recorded exactly like a crop suggestion: `corrections.suggest(scan, "rotation_front"/"rotation_back", angle,
+"back-ocr-orientation@1")`, and `front_rotation`/`back_rotation` are set directly (there's no separate
+"suggested" preview field for an image's rotation - the preview renders whatever the field currently holds).
+The Front/Back **auto-rotated** chip (`data-state="suggested"` while unedited) only shows when a rotation was
+actually applied (angle 0 - already upright - has nothing to flag); the manual Rotate buttons are always the
+override on either side, independently.
+
+Config: `analysis.orientation_search` (default `true`), `analysis.orientation_search_max_side` (default `300`).
 
 ## 4d. Text on back (OCR)
 
@@ -264,9 +337,11 @@ the incumbent on held-out data (Stage 4).
 
 ### Stage 1: Correction capture **[implemented]** (`banana/core/corrections.py`)
 - **Suggestions** are stored when produced: `scan.suggestions[key] = {value, producer, ...extra}` for
-  `ocr_line`, `description`, `date`, `people`, `places`, `events`, `crop_front`/`crop_back`, `pairing`, `duplicate`
-  (+ `distance`) and `blank_back` (+ `edge_density`). Rotation has no model, so its suggestion is `0` from `none@0`.
-  The entities endpoint records the latest People/Places/Events suggestion when called with `scan_id`.
+  `ocr_line`, `description`, `date`, `people`, `places`, `events`, `crop_front`/`crop_back`, `rotation_front`/
+  `rotation_back` (angle, `back-ocr-orientation@1` when auto-detected from the back's OCR orientation, else `0`
+  from `none@0`), `pairing`, `duplicate` (+ `distance`), `blank_back` (+ `edge_density`), and `immich_duplicate`
+  (+ `asset_id`, `distance`) - a match against the operator's own Immich library, kept separate from the local
+  `duplicate` field. The entities endpoint records the latest People/Places/Events suggestion when called with `scan_id`.
 - **OCR lines** keep `raw` (engine output), `text` (after the dictionary; plus `dictionary` = version when changed),
   and the operator's `corrected` or `removed`. `scan.ocr_frame = {crop, rotation, max_side}` says which frame the boxes refer to.
 - **On approval** (`PATCH status=approved`), `record_approval` appends one `correction_event` per item:
@@ -276,14 +351,16 @@ the incumbent on held-out data (Stage 4).
 | `ocr_line` | line | removed (Not text) / edited (`corrected` ≠ text) / kept | bbox, frame, raw_ocr, score, **line image** (`<data_dir>/training/ocr_lines/*.png`) |
 | `person` / `place` / `event` | value | suggested & kept → kept; suggested & gone → removed; new → added (producer `operator`) | – |
 | `date` | scan | suggested vs approved label | – |
-| `rotation` | side | 0 (none@0) vs applied | side |
+| `rotation` | side | 0 (`none@0`) or auto-detected (`back-ocr-orientation@1`) vs applied | side |
 | `crop` | side | detected vs current | side |
 | `pairing` | scan | ingest front/back names vs current (swap → edited) | – |
 | `duplicate` | scan | flagged and approved → kept | dHash distance |
 | `blank_back` | scan | suggested blank/content vs `keep_back` | edge_density |
+| `immich_duplicate` | scan | app flag and operator flag → kept; app flag only → removed; operator flag only → added | Immich asset id, dHash distance |
 
 - Every event has `producer` (`name@version`, see `producers()`; e.g. `rapidocr-ppocr@1.4.4`, `photo_bbox@1`,
-  `dhash@1(max=6)`, `edge-density@1(threshold=0.001)`, `+dictionary@NlMw` when the dictionary changed a line).
+  `dhash@1(max=6)`, `edge-density@1(threshold=0.001)`, `back-ocr-orientation@1`, `immich-dhash@1(max=6)`,
+  `+dictionary@NlMw` when the dictionary changed a line).
 - **Append-only:** SQLite triggers `correction_event_no_update` / `_no_delete` abort any UPDATE or DELETE.
   Re-approving an unchanged scan writes nothing. Any change writes a new set with a new `approval_id`.
 - **Training filter** `training_events()`: the latest approval per scan, for scans currently `approved|exported|stacked`.
@@ -330,7 +407,7 @@ split by batch and writer; the System/Learning panel will show active version, s
 | `inbox`, `archive`, `library`, `data` | exists and writable | | missing / not writable | |
 | `sane` | `scanimage` on PATH | | not found | no scanner configured |
 | `scanner` | TCP connect to host:port | | unreachable | not configured |
-| `immich` | | configured (integration planned) | | not configured |
+| `immich` | connected, N asset(s) | | HTTP error / unreachable | disabled or not configured |
 
 ## 5. Analysis
 
@@ -448,6 +525,43 @@ Values are HTML-escaped and written with `-E`, so newlines survive the ExifTool 
 - Library exclusion pattern `**/.staging/**`.
 - **[planned]** `POST /api/libraries/{id}/scan` → find assets by `originalPath` → `POST /api/stacks` (front primary) → optional album per batch → metadata refresh on re-export.
 
+### Read-only duplicate check **[implemented, route-confirmation pending against a real server]**
+
+`banana/immich/` (`client.py`, `dedup.py`, `settings.py`). Operator-triggered only, gated by `immich_setting.enabled`
+(default off) - never runs on ingest or export automatically. The client has no `PUT`/`PATCH`/`DELETE` method at
+all, and its one `_post` helper checks the target path against a hardcoded allow-list of exactly the two
+documented non-mutating POST endpoints (`assets/bulk-upload-check`, `search/metadata`), raising before any
+request otherwise. `build_client()` returns `None` whenever the setting is disabled or incomplete, so no network
+call happens anywhere until the operator has explicitly enabled it and saved a URL + key.
+
+Two independent passes, both read-only:
+1. **Exact checksum, at export time.** `Exporter` re-encodes on export, so only the file actually written to
+   `sorted` can ever byte-match Immich - this is *export verification*, not pre-export prevention. A SHA1 is
+   computed alongside the existing SHA256 and checked against Immich via `POST /assets/bulk-upload-check`
+   (chunked at 500 items, unconfirmed cap); a match's asset id is stored on `Export.immich_front_id`/`immich_back_id`,
+   with `Export.immich_checked_at` distinguishing "never checked" from "checked, no match." Reset to `None` on
+   every re-export.
+2. **Perceptual, our own dHash on Immich's thumbnails.** Immich's Smart Search only accepts text or an existing
+   Immich asset id as a similarity anchor - there is no API to ask "is this external image similar to anything
+   in the library." So the library is enumerated via `POST /search/metadata` (paginated), each new/changed
+   asset's thumbnail is fetched (`GET /assets/{id}/thumbnail`) and hashed with the same native `core.dhash`
+   already used for local rescan detection, and the result is cached in `immich_asset_hash` keyed by Immich's
+   reported checksum. Every scan's `dhash_hex` is then compared against the cache with `core.hamming` and
+   `analysis.dhash_max_distance` - the same threshold already used for local rescans, against a different pool.
+   A match is recorded via `corrections.suggest(scan, "immich_duplicate", {asset_id, distance}, producer)`, kept
+   entirely separate from the local-rescan `duplicate_group_id`/`operator_duplicate` fields.
+
+Runs as a background thread inside the API process (`ImmichCheckController`, same polled state/phase/lock shape
+as `sane.ScanController`) started by `POST /api/immich/check` (`409` if disabled or already running) and polled
+via `GET /api/immich/check/status`. `GET /api/immich/status` is a separate, cheap live probe (calls
+`assets/statistics`) used by "Test connection" and the health check - `OFF` with zero network calls when
+disabled, `OK` with the asset count when reachable, `FAIL` with a plain-language reason (`HTTP {code} - check the
+API key/library id`, or `Could not connect: ...`) otherwise.
+
+**Genuine unknowns, pending a real server:** exact `search/metadata` pagination field names; exact
+`assets/{id}/thumbnail` size query param; whether `bulk-upload-check` actually caps items per request; the exact
+asset-count field name in `assets/statistics`'s response.
+
 ---
 
 ## 8. HTTP API
@@ -468,10 +582,16 @@ Values are HTML-escaped and written with `-E`, so newlines survive the ExifTool 
 | GET | `/api/scans?status=&limit=` | list (default limit 500, max 5000), ordered by id |
 | GET | `/api/scans/{id}` | one scan |
 | PATCH | `/api/scans/{id}` | update (see below) |
+| DELETE | `/api/scans/{id}` | delete a rejected scan's files + record; 409 unless rejected, unexported, and no correction history |
 | GET | `/api/scans/{id}/image/{front\|back}?size=` | cached JPEG preview, 64–4096 px (default 1600); 404 if missing |
 | GET | `/api/dates/parse?text=` | date candidates, best first |
 | POST | `/api/ingest` | run inbox ingest → `{batch, created[], skipped[], unmatched[], possible_duplicates[]}` |
 | POST | `/api/export` | export every `approved` scan, **synchronously** → `{exported[{id,front,back}], errors[{id,error}]}` |
+| GET | `/api/immich/settings` | `{enabled, url, library_id, import_path_prefix, api_key_set, api_key_last4}` - never the raw key |
+| PATCH | `/api/immich/settings` | body: any of `enabled, url, library_id, import_path_prefix, api_key`; omit `api_key` to keep it, `""` to clear it |
+| GET | `/api/immich/status` | live probe, zero network calls when disabled → `{enabled, connected, asset_count, error}` |
+| POST | `/api/immich/check` | start the read-only duplicate check in the background; 409 if disabled or already running |
+| GET | `/api/immich/check/status` | poll the running/last check → `{state, phase, message, stats, ...}` |
 
 **Scan JSON** = all scan columns except `ocr_lines`, plus `batch`, `box_label`, `has_back`, `export` (row or null) and
 `date {precision, year, month, day, season, circa, label, exif, approximate}`.
@@ -543,8 +663,15 @@ The rules live in CLAUDE.md > **UI DESIGN SYSTEM** (direction: *Darkroom*). This
   since its colors are overridden separately, see Guide tour below).
   `tests/ui/test_ui_live.py::test_ui_provisional_marking` covers provisional marking in the browser, alongside the tests for visible controls, refresh safety and export confirmation.
 - **Learning panel** (top bar **Learning** with usable-event count): corrections total, per-field kept/fixed/removed/added
-  bars, dictionary entries, threshold proposals with Apply/Revert, active producers, stage status. Health and Learning panels
-  are mutually exclusive; Escape closes either.
+  bars, dictionary entries, threshold proposals with Apply/Revert, active producers, stage status. Health, Learning and
+  Immich panels are mutually exclusive; Escape closes whichever is open.
+- **Immich panel** (top bar **Immich**): settings form (server URL, API key as `type="password"` showing only
+  `•••• <last4>` once saved, library ID, Enabled checkbox), **Test connection** (hits `/api/immich/status` without
+  saving), and **Check Immich for duplicates** (goes through the same confirm dialog as Export/Delete, since it
+  reaches a real external server; polls `/api/immich/check/status`). The panel's own copy states plainly: read-only,
+  never uploads, edits, stacks, or triggers anything in Immich. Editor gets a matching `in Immich?` chip
+  (`#scan-immich-dup`, dashed until confirmed) and a manual flag toggle, mirroring **Flag duplicate**'s
+  kept/removed/added pattern but recorded as the separate `immich_duplicate` correction field.
 - **Guide tour** (top bar **Guide**, shortcut `G`) - `banana/web/static/tour.js`, vendored **driver.js** 1.8.0 (MIT,
   `static/vendor/driver/`, `SOURCE.txt`; confirmed to make no network requests of its own). A 14-step walkthrough of the
   whole workflow (scan/ingest → queue → images → editor tools → text on back → date → description → chips →
@@ -596,6 +723,7 @@ The rules live in CLAUDE.md > **UI DESIGN SYSTEM** (direction: *Darkroom*). This
 | `banana export --manual-json FILE [--config]` | import a hand-written batch spec ([manual-export.md](manual-export.md)) and export it |
 | `banana serve [--host 0.0.0.0] [--port 8000]` | API + UI (config from `BANANA_CONFIG`) |
 | `banana worker [--config]` | job worker loop |
+| `banana repair-duplicates [--config]` | fix any `duplicate_group_id` left pointing at a deleted scan; safe to re-run, no-op when nothing's dangling |
 
 ---
 
@@ -615,6 +743,8 @@ Loaded from `--config`, else `$BANANA_CONFIG`, else `./config.toml`, else defaul
 | `analysis.dhash_max_distance` | `6` | |
 | `analysis.read_text` | `true` | OCR backs during ingest/re-analyze |
 | `analysis.ocr_max_side` | `1800` | px, long side given to OCR |
+| `analysis.orientation_search` | `true` | auto-rotate front+back from the back's OCR orientation (needs `ocr` extra) |
+| `analysis.orientation_search_max_side` | `300` | px, long side per rotation tried (up to 6 cheap passes) |
 | `dates.two_digit_year_pivot` | current year mod 100 | |
 | `scanner.host` | `""` | scanner address for the status indicator (FF-680W: `192.168.16.178`) |
 | `scanner.port` | `1865` | Epson network scan port; ports 80/443 serve the Epson web config |
@@ -625,10 +755,12 @@ Loaded from `--config`, else `$BANANA_CONFIG`, else `./config.toml`, else defaul
 | `scanner.resolution` | `600` | dpi (50–600) |
 | `scanner.auto_crop`, `scanner.skew_correction` | `true`, `true` | |
 | `scanner.timeout_seconds` | `3600` | maximum run time for one scan |
+| `scanner.max_feeder_count` | `36` | ADF hopper capacity; caps "Whole stack" (`--batch-count`), never a forced count |
 | `scanner.after_scan` | `review` | default destination: `review` \| `inbox` |
 | `scanner.first_side` | `back` | which page of a duplex pair is the photo's back (FF-680W: `back`) |
 | `exiftool.path` | `exiftool` | |
-| `immich.url`, `api_key`, `library_id`, `import_path_prefix` | | **[planned]** use |
+| `immich.enabled` | `false` | hard opt-in; filling in `url`/`api_key` alone never starts any network activity |
+| `immich.url`, `api_key`, `library_id`, `import_path_prefix` | | **[implemented]** pre-set for a headless deploy; once the operator saves anything in the Immich panel, the `immich_setting` DB row takes precedence |
 
 ---
 
@@ -695,5 +827,6 @@ Live dev server for watching changes: `scripts/dev_live.sh` (uvicorn `--reload` 
 | 4 Review UI | redesigned (cards, skeletons, bundled fonts); duplicate resolver and bulk edit pending |
 | Learning loop 1–2 | correction capture, dictionary, threshold proposals: done |
 | Learning loop 3–4 | retraining and promotion gate: pending (needs correction data) |
+| 4b Immich read-only duplicate check (exact checksum + perceptual dHash) | done; route/param specifics **not yet verified against a real Immich server** |
 | 5 Immich automation (scan, stacks, albums, refresh) | pending |
 | 6 TensorRT, batching, profiling | pending |

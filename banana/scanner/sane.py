@@ -47,6 +47,10 @@ def scanimage_args(cfg: ScannerConfig, staging: Path, count: str = "all") -> lis
     ]
     if count == "one":
         args.append(f"--batch-count={2 if cfg.duplex else 1}")
+    else:
+        # A ceiling, not a forced count: scanimage's own "out of documents" detection still stops early on a
+        # smaller stack. This just keeps "Whole stack" from running past the ADF hopper's real capacity.
+        args.append(f"--batch-count={cfg.max_feeder_count * (2 if cfg.duplex else 1)}")
     return args
 
 
@@ -154,6 +158,8 @@ class ScanController:
             message = f"Scanned {photos} photo(s), {len(pages)} page(s)"
             if self.cfg.duplex and len(pages) % 2:
                 message += "; odd page count, the last photo has no back"
+            if run.count == "all" and photos >= self.cfg.max_feeder_count:
+                message += f"; feeder capped at {self.cfg.max_feeder_count}, scan again for more"
             if run.destination == "inbox":
                 message += f"; {len(files)} file(s) left in the inbox"
             with self._lock:
