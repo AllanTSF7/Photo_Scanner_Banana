@@ -15,3 +15,5 @@ data/
 # Playwright CLI workspace and page snapshots
 .playwright/
 .playwright-cli/
+# Claude Code runtime state (session locks, scheduled-task bookkeeping)
+.claude/scheduled_tasks.lock
