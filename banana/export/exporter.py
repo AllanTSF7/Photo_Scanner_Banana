@@ -34,16 +34,21 @@ class ExportRequest:
 class ExportResult:
     front_rel: PurePosixPath
     front_sha256: str
+    front_sha1: str = ""  # what Immich's bulk-upload-check compares by (banana/immich/dedup.py)
     back_rel: PurePosixPath | None = None
     back_sha256: str | None = None
+    back_sha1: str | None = None
 
 
-def sha256_file(path: Path) -> str:
-    digest = hashlib.sha256()
+def file_hashes(path: Path) -> tuple[str, str]:
+    """(sha256, sha1) in one read pass - sha256 is our own change-detection hash (banana/export/service.py's
+    `previous` comparison), sha1 is the one Immich's bulk-upload-check needs."""
+    sha256, sha1 = hashlib.sha256(), hashlib.sha1(usedforsecurity=False)  # sha1 here is an interop id, not a security hash
     with path.open("rb") as f:
         for chunk in iter(lambda: f.read(1 << 20), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+            sha256.update(chunk)
+            sha1.update(chunk)
+    return sha256.hexdigest(), sha1.hexdigest()
 
 
 class Exporter:
@@ -68,15 +73,16 @@ class Exporter:
         finally:
             shutil.rmtree(staging, ignore_errors=True)
 
-        front_rel, _, front_hash = prepared[0]
-        result = ExportResult(front_rel, front_hash)
+        front_rel, _, (front_sha256, front_sha1) = prepared[0]
+        result = ExportResult(front_rel, front_sha256, front_sha1)
         if len(prepared) > 1:
-            result.back_rel, _, result.back_sha256 = prepared[1]
+            back_rel, _, (back_sha256, back_sha1) = prepared[1]
+            result.back_rel, result.back_sha256, result.back_sha1 = back_rel, back_sha256, back_sha1
         return result
 
     def _prepare(
         self, req: ExportRequest, side: layout.Side, src: Path, edit: Edit, staging: Path
-    ) -> tuple[PurePosixPath, Path, str]:
+    ) -> tuple[PurePosixPath, Path, tuple[str, str]]:
         suffix = src.suffix if edit.is_identity else ".jpg"  # edited images are re-encoded as JPEG (q95)
         rel = layout.relative_path(req.scan_id, side, suffix, req.meta.date, req.batch_name)
         staged = staging / rel.name
@@ -90,7 +96,7 @@ class Exporter:
         self.writer.write_sidecar(staged, sidecar)
         self.writer.verify(staged, req.meta, is_back=is_back, xmp_only=False)
         self.writer.verify(sidecar, req.meta, is_back=is_back, xmp_only=True)
-        return rel, staged, sha256_file(staged)
+        return rel, staged, file_hashes(staged)
 
     def _move_into_place(self, rel: PurePosixPath, staged: Path) -> None:
         dest = self.root / rel

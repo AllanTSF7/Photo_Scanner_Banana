@@ -83,3 +83,15 @@ def save_edited(src: Path, dest: Path, edit: Edit, quality: int = 95) -> None:
 
 def analysis_gray(path: Path, edit: Edit, max_side: int) -> np.ndarray:
     return np.asarray(open_edited(path, edit, max_side).convert("L"), dtype=np.uint8)
+
+
+def analysis_gray_bytes(data: bytes, max_side: int) -> np.ndarray:
+    """Same as `analysis_gray`, for image bytes already in memory (e.g. a fetched thumbnail) rather than a
+    file on disk - there's no crop/rotation to apply to someone else's thumbnail, just a downscale."""
+    from io import BytesIO
+
+    with Image.open(BytesIO(data)) as im:
+        im = im.convert("L")
+        if max(im.size) > max_side:
+            im.thumbnail((max_side, max_side), Image.Resampling.LANCZOS)
+        return np.asarray(im, dtype=np.uint8)

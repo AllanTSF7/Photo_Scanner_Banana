@@ -224,7 +224,7 @@ def test_date_field_preview_valid_invalid_and_clear(page):
 
     date.fill("sometime maybe")
     expect(page.locator("#date-preview .bad")).to_be_visible()
-    page.click("button[type=submit]")
+    page.click("#form button[type=submit]")
     expect(toast(page)).to_contain_text("could not understand date")
     expect(toast(page)).to_have_class("toast error")
 
@@ -260,7 +260,7 @@ def test_description_and_chip_inputs(page):
         chip_input.press("Enter")
 
     page.fill("#date-text", "Dec 25, 1984")
-    page.click("button[type=submit]")
+    page.click("#form button[type=submit]")
     expect(toast(page)).to_have_text("Saved")
     expect(page.locator("#save-state")).to_have_text("")
 
@@ -643,7 +643,7 @@ def test_people_places_events_derived_from_description(page):
     expect(_chips(page, "events").filter(has_text="Wedding")).to_have_count(0)
     expect(page.locator('.chips-input[data-field="events"] .suggestion', has_text="Wedding")).to_have_count(0)
 
-    page.click("button[type=submit]")
+    page.click("#form button[type=submit]")
     expect(toast(page)).to_have_text("Saved")
     page.reload()
     page.locator("#scan-list li").first.click()
@@ -657,7 +657,7 @@ def test_filled_fields_get_suggestion_chips_not_overwrites(page):
     box = page.locator('.chips-input[data-field="people"]')
     box.locator("input").type("Grandpa Joe")
     box.locator("input").press("Enter")
-    page.click("button[type=submit]")
+    page.click("#form button[type=submit]")
     expect(toast(page)).to_have_text("Saved")
     page.reload()
     page.locator("#scan-list li").first.click()
@@ -1104,3 +1104,73 @@ def test_delete_button_at_400px(browser, server):
     pg.locator("#btn-delete").scroll_into_view_if_needed()
     assert no_horizontal_scroll(pg), "delete button causes horizontal scroll at 400px"
     context.close()
+
+
+# ---------------------------------------------------------------- Immich (read-only duplicate check)
+
+
+def test_immich_panel_settings_save_and_mask_round_trip(page):
+    page.click("#btn-immich")
+    expect(page.locator("#immich-panel")).to_be_visible()
+    expect(page.locator("#health-panel")).to_be_hidden()
+    expect(page.locator("#learning-panel")).to_be_hidden()
+
+    page.fill("#immich-url", "http://127.0.0.1:1")  # nothing listens here: fails fast, never hangs
+    page.fill("#immich-api-key", "supersecretkey1234")
+    page.fill("#immich-library-id", "lib-1")
+    page.check("#immich-enabled")
+    page.click("#btn-immich-save")
+    expect(page.locator("#immich-save-state")).to_have_text("Saved")
+    expect(page.locator("#immich-api-key")).to_have_value("")  # never redisplays what was typed
+    expect(page.locator("#immich-api-key")).to_have_attribute("placeholder", "•••• 1234")
+    assert "supersecretkey1234" not in page.content()
+
+    page.click("#btn-immich-close")
+    expect(page.locator("#immich-panel")).to_be_hidden()
+    page.click("#btn-immich")  # re-open: settings persisted server-side
+    expect(page.locator("#immich-url")).to_have_value("http://127.0.0.1:1")
+    expect(page.locator("#immich-enabled")).to_be_checked()
+    assert "supersecretkey1234" not in page.content()
+
+    page.click("#btn-immich-test")
+    expect(toast(page)).to_contain_text("Could not connect", timeout=10000)
+
+    # Leave it disabled again so other tests in this suite see the default (no network calls) state.
+    page.uncheck("#immich-enabled")
+    page.click("#btn-immich-save")
+
+
+def test_immich_panel_at_400px(browser, server):
+    context = browser.new_context(viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    pg.click("#btn-immich")
+    expect(pg.locator("#immich-panel")).to_be_visible()
+    assert no_horizontal_scroll(pg), "Immich panel causes horizontal scroll at 400px"
+    for selector in ("#immich-url", "#immich-api-key", "#immich-library-id", "#immich-enabled",
+                      "#btn-immich-test", "#btn-immich-save", "#btn-immich-check"):
+        pg.locator(selector).scroll_into_view_if_needed()
+        expect(pg.locator(selector)).to_be_visible()
+    context.close()
+
+
+def test_immich_chip_shows_only_for_a_flagged_scan_and_manual_flag_toggles_it(page):
+    ingest(page)
+    page.locator("#scan-list li").first.click()
+    expect(page.locator("#scan-immich-dup")).to_be_hidden()
+    expect(page.locator("#btn-flag-immich-dup")).to_have_attribute("aria-pressed", "false")
+
+    page.click("#btn-flag-immich-dup")
+    expect(toast(page)).to_contain_text("Flagged as already in Immich")
+    expect(page.locator("#scan-operator-immich-dup")).to_be_visible()
+    expect(page.locator("#btn-flag-immich-dup")).to_have_attribute("aria-pressed", "true")
+    expect(page.locator("#btn-flag-immich-dup")).to_have_text("Unflag as in Immich")
+
+    page.click("#btn-flag-immich-dup")
+    expect(toast(page)).to_contain_text("Immich flag cleared")
+    expect(page.locator("#scan-operator-immich-dup")).to_be_hidden()
+
+
+def test_immich_check_button_disabled_until_enabled(page):
+    page.click("#btn-immich")
+    expect(page.locator("#btn-immich-check")).to_be_disabled()

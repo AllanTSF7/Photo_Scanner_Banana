@@ -23,7 +23,8 @@ from banana.models import Batch, CorrectionEvent, Scan, ScanStatus
 # Scans whose events may be used as training data. Pending and rejected scans never are.
 TRAINING_STATUSES = (ScanStatus.APPROVED.value, ScanStatus.EXPORTED.value, ScanStatus.STACKED.value)
 
-FIELDS = ("ocr_line", "person", "place", "event", "date", "rotation", "crop", "pairing", "duplicate", "blank_back")
+FIELDS = ("ocr_line", "person", "place", "event", "date", "rotation", "crop", "pairing", "duplicate", "blank_back",
+          "immich_duplicate")
 OPERATOR = "operator"
 NO_MODEL = "none@0"  # no model proposed this value: the default is still recorded (e.g. rotation with no back/no signal)
 
@@ -51,6 +52,7 @@ def producers(settings: Settings) -> dict[str, str]:
         "pairing": f"pairing@{settings.scanner.first_side}-first",
         "duplicate": f"dhash@1(max={settings.analysis.dhash_max_distance})",
         "blank_back": f"edge-density@1(threshold={settings.analysis.blank_edge_density})",
+        "immich_duplicate": f"immich-dhash@1(max={settings.analysis.dhash_max_distance})",
     }
 
 
@@ -191,6 +193,19 @@ def build_events(scan: Scan, settings: Settings, approval_id: str) -> list[Corre
         suggested_keep = entry["value"] != "blank"
         add("blank_back", entry["value"], "content" if approved_keep else "blank", entry["producer"],
             {"edge_density": entry.get("edge_density")}, action="kept" if suggested_keep == approved_keep else "edited")
+
+    # Immich duplicate: a separate signal from the local "duplicate" (rescan of another Scan row) above -
+    # same kept/removed/added shape, keyed off operator_immich_duplicate instead of operator_duplicate.
+    entry = s.get("immich_duplicate") or {}
+    suggested = entry.get("value") or {}
+    app_flag = bool(suggested)
+    operator_flag = bool(scan.operator_immich_duplicate)
+    if app_flag or operator_flag:
+        action = "kept" if app_flag and operator_flag else "removed" if app_flag else "added"
+        add("immich_duplicate", suggested if app_flag else None, {"immich_duplicate": operator_flag},
+            entry.get("producer", OPERATOR) if app_flag else OPERATOR,
+            {"asset_id": suggested.get("asset_id"), "distance": suggested.get("distance")} if app_flag else None,
+            action=action)
     return events
 
 

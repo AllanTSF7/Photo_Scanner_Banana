@@ -218,7 +218,34 @@ A smarter comparison is planned.
 
 ---
 
-## 6. Tags in Immich
+## 6. Checking Immich for duplicates
+
+An optional, separate check: "have I already scanned and imported this photo into Immich?" It's off until you
+turn it on, and it only ever **reads** from Immich - it never uploads, edits, stacks, or triggers a library scan
+there.
+
+**Turning it on:** open the **Immich** button in the top bar, fill in your Immich server URL, an API key
+(*Immich → Account Settings → API Keys*), and the External Library's ID, then tick **Enabled** and **Save**.
+Use **Test connection** to check the details work before relying on it. The key is never shown again once
+saved - only its last 4 characters, so you can tell which key is in use.
+
+**Running it:** click **Check Immich for duplicates**. It runs in the background (you can keep reviewing while
+it works) and does two things:
+- Checks whether the exact file you already **exported** matches something already in Immich (byte-for-byte).
+- Compares every scan's photo against thumbnails already in your Immich library, the same "looks similar" check
+  used for local rescans (see section 5), just pointed at your Immich library instead.
+
+A match shows as an **in Immich?** chip on that scan, dashed until you confirm or clear it with the flag button
+next to it - the same kept/removed/added pattern as **Flag duplicate**.
+
+**What it can't do:** it can't tell you a photo is a duplicate before you've exported it (export changes the
+file, so only the exported copy can ever match byte-for-byte), and it can't ask Immich "have you seen anything
+like this?" directly - Immich has no such feature, so the "looks similar" half of the check is computed here,
+not by Immich.
+
+---
+
+## 7. Tags in Immich
 
 What you enter becomes these Immich tags:
 
@@ -236,7 +263,7 @@ A `/` inside a name is changed to `-`, because `/` separates tag levels.
 
 ---
 
-## 7. Do and don't
+## 8. Do and don't
 
 **Do**
 - Finish scanning a stack before you ingest it.
@@ -250,7 +277,7 @@ A `/` inside a name is changed to `-`, because `/` separates tag levels.
 
 ---
 
-## 8. Keyboard shortcuts
+## 9. Keyboard shortcuts
 
 | Key | Action |
 |---|---|

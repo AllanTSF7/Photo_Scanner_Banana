@@ -22,6 +22,7 @@
         <button id="btn-learning" class="btn ghost learning-button" aria-expanded="false" aria-controls="learning-panel">
           Learning <span id="learning-count" class="count-badge mono">0</span>
         </button>
+        <button id="btn-immich" class="btn ghost" aria-expanded="false" aria-controls="immich-panel">Immich</button>
         <span id="scanner-status" class="scanner-status" hidden></span>
       </div>
       <div class="action-group scan-group">
@@ -102,6 +103,50 @@
     </div>
   </section>
 
+  <section id="immich-panel" class="drawer" hidden>
+    <div class="card">
+      <div class="panel-head">
+        <h2>Immich</h2>
+        <p class="muted">Read-only: checks whether a scan is already in your Immich library. Never uploads, edits, stacks, or triggers anything there.</p>
+        <span class="spacer"></span>
+        <button id="btn-immich-close" class="btn ghost">Close</button>
+      </div>
+      <form id="immich-settings-form" class="form card" autocomplete="off">
+        <div class="field">
+          <label for="immich-url">Server URL</label>
+          <input id="immich-url" type="text" placeholder="http://immich.example:2283">
+        </div>
+        <div class="grid2">
+          <div class="field">
+            <label for="immich-api-key">API key</label>
+            <input id="immich-api-key" type="password" placeholder="paste a new key to change it">
+            <p class="muted" id="immich-key-state"></p>
+          </div>
+          <div class="field">
+            <label for="immich-library-id">Library ID</label>
+            <input id="immich-library-id" type="text" placeholder="the External Library's id in Immich">
+          </div>
+        </div>
+        <label class="toggle"><input type="checkbox" id="immich-enabled"> Enabled - checks Immich when I ask</label>
+        <div class="form-actions">
+          <button type="button" class="btn" id="btn-immich-test">Test connection</button>
+          <span class="spacer"></span>
+          <span id="immich-save-state" class="muted"></span>
+          <button type="submit" class="btn primary" id="btn-immich-save">Save</button>
+        </div>
+      </form>
+      <div class="card immich-check-card">
+        <div class="panel-head">
+          <h3>Duplicate check</h3>
+          <span id="immich-connection" class="muted mono"></span>
+          <span class="spacer"></span>
+          <button type="button" class="btn" id="btn-immich-check">Check Immich for duplicates</button>
+        </div>
+        <p id="immich-check-message" class="muted"></p>
+      </div>
+    </div>
+  </section>
+
   <div class="layout">
     <aside class="queue card" aria-label="Scan queue">
       <div class="queue-head"><h2>Queue</h2><span id="queue-count" class="muted mono"></span></div>
@@ -123,12 +168,15 @@
             <span id="scan-status" class="chip status"></span>
             <span id="scan-dup" class="chip warn" hidden></span>
             <span id="scan-operator-dup" class="chip warn" hidden>you flagged as duplicate</span>
+            <span id="scan-immich-dup" class="chip warn" hidden>in Immich?</span>
+            <span id="scan-operator-immich-dup" class="chip warn" hidden>you flagged as in Immich</span>
           </div>
           <span class="muted mono scan-batch" id="scan-batch"></span>
           <div class="editor-tools">
             <button type="button" class="btn" id="btn-prev" data-shortcut="k">Previous</button>
             <button type="button" class="btn" id="btn-next" data-shortcut="j">Next</button>
             <button type="button" class="btn" id="btn-flag-dup" data-shortcut="d" aria-pressed="false">Flag duplicate</button>
+            <button type="button" class="btn" id="btn-flag-immich-dup" aria-pressed="false">Flag as in Immich</button>
             <button type="button" class="btn" id="btn-swap">Swap front/back</button>
             <button type="button" class="btn" id="btn-redetect">Re-detect crop</button>
           </div>

@@ -358,7 +358,53 @@ def test_component_health(client):
     assert by_name["database"]["status"] == "ok"
     assert by_name["inbox"]["status"] == "ok"
     assert by_name["scanner"]["status"] == "off"  # not configured in this fixture
+    assert by_name["immich"]["status"] == "off"  # not configured, and never contacted (immich.enabled defaults false)
     assert data["overall"] in ("ok", "warn", "fail")
+
+
+def test_immich_settings_never_echo_the_raw_api_key(client):
+    c, _ = client
+    assert c.get("/api/immich/settings").json() == {
+        "enabled": False, "url": "", "library_id": "", "import_path_prefix": "/mnt/photo_vault/sorted",
+        "api_key_set": False, "api_key_last4": None,
+    }
+
+    saved = c.patch("/api/immich/settings", json={
+        "enabled": True, "url": "http://immich.example", "library_id": "lib-1", "api_key": "supersecretkey1234",
+    }).json()
+    assert saved["api_key_set"] is True and saved["api_key_last4"] == "1234"
+    assert "api_key" not in saved and "supersecretkey1234" not in str(saved)
+
+    # Re-fetching, and updating an unrelated field, both still never surface the raw key.
+    for response in (c.get("/api/immich/settings"), c.patch("/api/immich/settings", json={"enabled": False})):
+        body = response.json()
+        assert body["api_key_set"] is True and body["api_key_last4"] == "1234"
+        assert "supersecretkey1234" not in str(body)
+
+
+def test_immich_status_makes_no_network_call_when_disabled(client):
+    c, _ = client
+    # Even with a URL/key saved, disabled means no attempt is made - error stays None, not a connection failure.
+    c.patch("/api/immich/settings", json={"url": "http://127.0.0.1:1", "api_key": "k"})  # port 1: nothing listens
+    status = c.get("/api/immich/status").json()
+    assert status == {"enabled": False, "connected": False, "asset_count": None, "error": None}
+
+
+def test_immich_check_refused_when_disabled(client):
+    c, _ = client
+    response = c.post("/api/immich/check")
+    assert response.status_code == 409
+    assert "enabled" in response.json()["detail"]
+
+
+def test_operator_immich_duplicate_flag_round_trips(client):
+    c, _ = client
+    c.post("/api/ingest")
+    sid = c.get("/api/scans").json()[0]["id"]
+    assert c.get(f"/api/scans/{sid}").json()["operator_immich_duplicate"] is False
+    updated = c.patch(f"/api/scans/{sid}", json={"operator_immich_duplicate": True}).json()
+    assert updated["operator_immich_duplicate"] is True
+    assert updated["immich_duplicate_asset_id"] is None
 
 
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")

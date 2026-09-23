@@ -46,8 +46,20 @@ Start with the **System** indicator in the top bar of the review page. Click it 
 | Inbox / Archive / Library / Data folder | folder missing or not writable | create it, check the NFS mount, check permissions |
 | SANE | `scanimage` missing | [shell] `apt install sane-utils` (already in the Docker image) |
 | Scanner | no answer on `192.168.16.178:1865` | scanner on and on Wi-Fi? same network as the server? (see below) |
+| Immich | `FAIL` with an HTTP or connection error | see **Immich check fails** below |
 
-C++ core amber = slower Python fallback, still works. Immich hollow dot = not connected yet (expected).
+C++ core amber = slower Python fallback, still works. Immich shows **off** until you enable it in the Immich
+panel and save a URL + API key - that's expected, not a problem.
+
+### Immich check fails / shows a problem
+The check is fully read-only and only runs when you enable it (see [operators guide §6](operators.md#6-checking-immich-for-duplicates)).
+
+| `/api/immich/status` `error` | Likely cause | Fix |
+|---|---|---|
+| `Could not connect: ...` | wrong URL, Immich down, or a network/firewall block between the app and Immich | check the URL, that Immich is reachable from wherever the app runs, and any firewall between them |
+| `HTTP 401` / `HTTP 403` | API key wrong, expired, or revoked | generate a new key in Immich → Account Settings → API Keys and save it again |
+| `HTTP 404` | wrong library id, or the route doesn't exist on this Immich version | confirm the External Library id in Immich; if it's right, this app's hardcoded routes (`assets/bulk-upload-check`, `search/metadata`, `assets/statistics`, `assets/{id}/thumbnail`) may not match a much newer/older Immich release - check that server's own `/api/*` OpenAPI docs |
+| duplicates never show up | the check hasn't been run yet, or nothing matched | click **Check Immich for duplicates**; remember exact-checksum matches only ever appear **after export** (see limitation in operators guide §6) |
 
 ### Scanner offline / Scan feeder disabled
 1. Scanner powered on, not asleep, Wi-Fi light on.
@@ -248,7 +260,7 @@ Don't edit the database while the server is running unless you know what you're 
 | B-4 | Export runs inside the web request | low (large batches) | open |
 | B-5 | Re-export after a date change makes Immich see a new asset | medium | open, by design until the Immich integration |
 | B-6 | A scan in progress is lost if the server restarts | low | open |
-| B-7 | Scanner limited to 600 dpi, no enhance/auto-rotate through SANE | low | limitation of the `epsonds` backend |
+| B-7 | Scanner limited to 600 dpi, no enhance through SANE, and SANE never auto-rotates | low | limitation of the `epsonds` backend; app compensates for rotation itself (see B-7 detail) |
 | B-8 | `--adf-crp` ignored: every page is the full 8.5 × 15.5 in canvas | high | worked around: software crop (`photo_bbox`) |
 | B-9 | Scanned front/back arrived swapped | high | fixed: `scanner.first_side = "back"`; existing scans use **Swap front/back** |
 | B-10 | Scan progress showed "0 pages" while ingesting | low | fixed: page count kept, phase shown as "Processing" |
@@ -266,6 +278,8 @@ Don't edit the database while the server is running unless you know what you're 
 | B-22 | Every page load logged a 404 for `/api/dev/reload-token` on the normal server | low | fixed: endpoint always exists and returns `enabled: false` outside dev (found with the Playwright CLI) |
 | B-23 | Approve then Reject pressed quickly: the second action was silently dropped | medium | fixed: status actions queue and apply to the scan shown next; selection is never cleared during re-render; `test_rapid_approve_then_reject_acts_on_the_next_scan` |
 | B-24 | Deleting a rejected scan left other scans saying "possible rescan of #N" for the deleted id forever | medium | fixed: `release_from_duplicate_group` re-anchors or clears followers before delete; `banana repair-duplicates` fixes data from before the fix; `test_deleting_a_duplicate_anchor_reassigns_its_follower` |
+| B-25 | Adding the Immich settings form broke every existing "Save the scan" UI test | medium | fixed: the Immich panel's own Save button is also `type="submit"`, so the generic `button[type=submit]` selector matched two elements; tests now scope to `#form button[type=submit]` |
+| B-26 | The guide tour silently derailed partway through after the Immich panel was added | medium | fixed: the tour targeted the untargeted `.grid2`/`.form-actions` classes, which the Immich panel also uses and which sit earlier in the page, so the tour highlighted the (hidden) Immich panel instead of the editor; tour steps now scope to `#form .grid2` / `#form .form-actions` |
 
 #### B-6 Scan interrupted by a server restart
 Scans run inside the server process. Restarting it (deploy, crash, or the live dev server reloading after a
@@ -274,8 +288,9 @@ for recovering the pages. (Planned: run scans in the worker process.)
 
 #### B-7 SANE limits
 `epsonds` offers up to 600 dpi for the FF-680W (Epson's own software also has 1200 dpi) and no FastFoto
-auto-enhance or auto-rotate. Long-page mode is reported not to work. Rotate photos in the review step
-(planned) or in Immich.
+auto-enhance, and SANE itself never auto-rotates a scan. Long-page mode is reported not to work. The app
+compensates for rotation itself after the scan (see "Auto-rotate" in specifications.md §5); manual **Rotate**
+buttons remain as an override, and rotating further in Immich also still works.
 
 #### B-1 dHash flags similar-looking photos as rescans
 **Symptom:** `dup?` on unrelated photos with a similar layout (same horizon, same white border, dark/light halves).
@@ -316,8 +331,11 @@ faces, favorites, albums and Immich-side edits on the old asset are lost, and th
 - **Limited database migrations.** New columns are added automatically; renamed or removed columns aren't. Keep backups of the database and the archive.
 - **Docker image not yet built or tested** on the Ubuntu server.
 - **Export not yet verified against a real Immich instance** (verified with ExifTool readback only).
+- **Immich duplicate check's exact routes/params are unverified against a real Immich server** (built and tested
+  against a fake server only, per the documented Immich API - see specifications.md §7 "Read-only duplicate check").
 - **Blank-back threshold** is tuned on synthetic images and needs calibration on real scans.
-- **Rejected scans** can't be deleted from the UI (by design, originals are kept). Rejected scans can be re-opened from the *Rejected* tab and approved.
+- **Rejected scans** can be deleted permanently from the *Rejected* tab (see operators.md §3 Step 3); refused if the
+  scan was ever approved or exported. Non-rejected scans can't be deleted.
 
 ---
 

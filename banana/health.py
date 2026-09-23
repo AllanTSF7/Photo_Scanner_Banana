@@ -11,8 +11,12 @@ from pathlib import Path
 from sqlalchemy import text
 from sqlalchemy.engine import Engine
 
-from banana import core
+import httpx
+
+from banana import core, db
 from banana.config import Settings
+from banana.immich.client import build_client
+from banana.immich.settings import get_effective
 from banana.scanner import sane
 
 OK, WARN, FAIL, OFF = "ok", "warn", "fail", "off"
@@ -105,12 +109,27 @@ def run_checks(settings: Settings, engine: Engine) -> list[dict]:
                    f"{cfg.device} {'reachable' if online else f'unreachable on port {cfg.port}'}")
         )
 
-    immich = settings.immich
-    checks.append(
-        _check("immich", "Immich", OFF, "not connected (automation planned)")
-        if not (immich.url and immich.api_key) else _check("immich", "Immich", WARN, "configured, integration planned")
-    )
+    checks.append(_immich_check(settings, engine))
     return checks
+
+
+def _immich_check(settings: Settings, engine: Engine) -> dict:
+    with db.session(engine) as session:
+        cfg = get_effective(session, settings)
+    if not cfg.enabled:
+        detail = "not configured" if not (cfg.url and cfg.api_key) else "disabled"
+        return _check("immich", "Immich", OFF, detail)
+    client = build_client(cfg)  # non-None: cfg.enabled and url/api_key are set, per build_client's own gate
+    try:
+        stats = client.statistics()
+        count = stats.get("images") if isinstance(stats, dict) else None
+        return _check("immich", "Immich", OK, f"connected, {count} asset(s)" if count is not None else "connected")
+    except httpx.HTTPStatusError as exc:
+        return _check("immich", "Immich", FAIL, f"HTTP {exc.response.status_code} - check the API key/library id")
+    except httpx.HTTPError as exc:
+        return _check("immich", "Immich", FAIL, f"unreachable: {cfg.url} ({exc})")
+    finally:
+        client.close()
 
 
 def overall(checks: list[dict]) -> str:

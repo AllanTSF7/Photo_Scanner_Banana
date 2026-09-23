@@ -69,6 +69,9 @@ class ExifToolConfig(BaseModel):
 
 
 class ImmichConfig(BaseModel):
+    # Hard opt-in: filling in url/api_key alone must never start any network activity. The operator-saved
+    # ImmichSetting DB row (banana/immich/settings.py) overrides all of this once anything has been saved there.
+    enabled: bool = False
     url: str = ""
     api_key: str = ""
     library_id: str = ""

@@ -107,6 +107,7 @@ document.addEventListener("keydown", (e) => {
   if (e.key === "Escape") {
     if (!$("health-panel").hidden) toggleHealth(false);
     if (!$("learning-panel").hidden) toggleLearning(false);
+    if (!$("immich-panel").hidden) toggleImmich(false);
     return;
   }
   const parts = [];
@@ -320,6 +321,7 @@ async function loadList() {
             <span>${s.date.precision === "unknown" ? "no date" : escapeHtml(s.date.label)}</span>
             ${state.status ? "" : `<span class="chip status ${s.status}">${statusLabel(s.status)}</span>`}
             ${s.duplicate_group_id || s.operator_duplicate ? `<span class="chip warn">dup?</span>` : ""}
+            ${s.immich_duplicate_asset_id || s.operator_immich_duplicate ? `<span class="chip warn">in Immich?</span>` : ""}
             ${s.back_type === "content" ? `<span class="chip">back text</span>` : ""}
           </div>
         </div>`;
@@ -410,6 +412,11 @@ function showEditor(scan, { full = false } = {}) {
   $("scan-operator-dup").hidden = !scan.operator_duplicate;
   $("btn-flag-dup").setAttribute("aria-pressed", String(!!scan.operator_duplicate));
   $("btn-flag-dup").firstChild.textContent = scan.operator_duplicate ? "Unflag duplicate" : "Flag duplicate";
+  $("scan-immich-dup").hidden = !scan.immich_duplicate_asset_id;
+  setSuggested($("scan-immich-dup"), !!scan.immich_duplicate_asset_id && !committed);
+  $("scan-operator-immich-dup").hidden = !scan.operator_immich_duplicate;
+  $("btn-flag-immich-dup").setAttribute("aria-pressed", String(!!scan.operator_immich_duplicate));
+  $("btn-flag-immich-dup").firstChild.textContent = scan.operator_immich_duplicate ? "Unflag as in Immich" : "Flag as in Immich";
 
   const version = encodeURIComponent(scan.updated_at);
   setFrameImage("front", `/api/scans/${scan.id}/image/front?v=${version}`);
@@ -779,6 +786,12 @@ $("btn-flag-dup").onclick = () => applyScanAction(async () => {
   toast(flagged ? "Flagged as duplicate" : "Duplicate flag cleared");
   return scan;
 });
+$("btn-flag-immich-dup").onclick = () => applyScanAction(async () => {
+  const flagged = !state.current?.operator_immich_duplicate;
+  const scan = await save({ operator_immich_duplicate: flagged });
+  toast(flagged ? "Flagged as already in Immich" : "Immich flag cleared");
+  return scan;
+});
 $("btn-swap").onclick = () => applyScanAction(async () => {
   await save();
   return api("POST", `/api/scans/${state.selectedId}/swap-sides`);
@@ -989,6 +1002,7 @@ function toggleHealth(open = $("health-panel").hidden) {
   $("btn-health").setAttribute("aria-expanded", String(open));
   if (open) {
     toggleLearning(false);
+    toggleImmich(false);
     panelSkeleton($("health-list"), lastHealthRows);
     loadHealth();
   }
@@ -1117,6 +1131,7 @@ function toggleLearning(open = $("learning-panel").hidden) {
   $("btn-learning").setAttribute("aria-expanded", String(open));
   if (open) {
     toggleHealth(false);
+    toggleImmich(false);
     panelSkeleton($("proposal-list"), 2);
     loadLearning();
   }
@@ -1124,6 +1139,87 @@ function toggleLearning(open = $("learning-panel").hidden) {
 $("btn-learning").onclick = () => toggleLearning();
 $("btn-learning-close").onclick = () => toggleLearning(false);
 $("btn-learning-refresh").onclick = () => withButton($("btn-learning-refresh"), loadLearning);
+
+// ---------- Immich (read-only duplicate check) ----------
+function toggleImmich(open = $("immich-panel").hidden) {
+  $("immich-panel").hidden = !open;
+  $("btn-immich").setAttribute("aria-expanded", String(open));
+  if (open) {
+    toggleHealth(false);
+    toggleLearning(false);
+    loadImmichSettings();
+  }
+}
+$("btn-immich").onclick = () => toggleImmich();
+$("btn-immich-close").onclick = () => toggleImmich(false);
+
+async function loadImmichSettings() {
+  const s = await api("GET", "/api/immich/settings");
+  $("immich-url").value = s.url;
+  $("immich-library-id").value = s.library_id;
+  $("immich-enabled").checked = s.enabled;
+  $("immich-api-key").value = "";
+  $("immich-api-key").placeholder = s.api_key_set ? `•••• ${s.api_key_last4}` : "paste a new key to change it";
+  $("immich-key-state").textContent = s.api_key_set ? "A key is saved. Leave blank to keep it." : "No key saved yet.";
+  renderImmichConnection(s);
+}
+
+function renderImmichConnection(s) {
+  $("immich-connection").textContent = s.enabled ? "Enabled" : "Disabled - turn on Enabled and save to check";
+  $("btn-immich-check").disabled = !s.enabled;
+}
+
+$("immich-settings-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = {
+    enabled: $("immich-enabled").checked,
+    url: $("immich-url").value.trim(),
+    library_id: $("immich-library-id").value.trim(),
+  };
+  if ($("immich-api-key").value) body.api_key = $("immich-api-key").value;
+  try {
+    const saved = await api("PATCH", "/api/immich/settings", body);
+    $("immich-save-state").textContent = "Saved";
+    setTimeout(() => ($("immich-save-state").textContent = ""), 2000);
+    await loadImmichSettings();
+    renderImmichConnection(saved);
+  } catch (e2) {
+    toast(e2.message, true);
+  }
+});
+
+$("btn-immich-test").onclick = () => withButton($("btn-immich-test"), async () => {
+  const status = await api("GET", "/api/immich/status");
+  if (!status.enabled) toast("Turn on Enabled and save first");
+  else if (status.connected) toast(`Connected${status.asset_count != null ? ` – ${status.asset_count} asset(s)` : ""}`);
+  else toast(status.error || "Could not connect", true);
+});
+
+let immichCheckPoll = null;
+$("btn-immich-check").onclick = () => withButton($("btn-immich-check"), async () => {
+  const ok = await confirmAction({
+    title: "Check Immich for duplicates?",
+    body: "Contacts your Immich server (read-only) to compare exported scans and library photos. This can take a while for a large library.",
+    confirmLabel: "Check now",
+  });
+  if (!ok) return;
+  try {
+    await api("POST", "/api/immich/check");
+  } catch (e) {
+    toast(e.message, true);
+    return;
+  }
+  clearInterval(immichCheckPoll);
+  immichCheckPoll = setInterval(async () => {
+    const status = await api("GET", "/api/immich/check/status");
+    $("immich-check-message").textContent = status.message || (status.state === "running" ? "Checking…" : "");
+    if (status.state !== "running") {
+      clearInterval(immichCheckPoll);
+      if (status.state === "done") { toast("Immich check finished"); await refresh(); }
+      else if (status.state === "failed") toast(status.message || "Immich check failed", true);
+    }
+  }, 1000);
+});
 
 // ---------- dev live reload (only when the server runs with BANANA_DEV_RELOAD=1) ----------
 (async function devReload() {
