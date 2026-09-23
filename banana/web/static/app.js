@@ -414,10 +414,11 @@ function showEditor(scan, { full = false } = {}) {
   $("btn-flag-dup").firstChild.textContent = scan.operator_duplicate ? "Unflag duplicate" : "Flag duplicate";
   $("scan-immich-dup").hidden = !scan.immich_duplicate_asset_id;
   const immichMatch = sug.immich_duplicate?.value;
-  $("scan-immich-dup").textContent = Number.isInteger(immichMatch?.distance)
-    ? `in Immich? (differs by ${immichMatch.distance} of 64)` : "in Immich?";
+  const immichDistance = Number.isInteger(immichMatch?.distance)
+    ? `differs by ${immichMatch.distance} of 64` : "";
+  $("scan-immich-dup").textContent = immichDistance ? `in Immich? (${immichDistance})` : "in Immich?";
   setSuggested($("scan-immich-dup"), !!scan.immich_duplicate_asset_id && !committed);
-  showImmichMatchLink(scan.immich_duplicate_asset_id);
+  showImmichCompare(scan, immichDistance, encodeURIComponent(scan.updated_at));
   $("scan-operator-immich-dup").hidden = !scan.operator_immich_duplicate;
   $("btn-flag-immich-dup").setAttribute("aria-pressed", String(!!scan.operator_immich_duplicate));
   $("btn-flag-immich-dup").firstChild.textContent = scan.operator_immich_duplicate ? "Unflag as in Immich" : "Flag as in Immich";
@@ -1159,6 +1160,18 @@ $("btn-immich").onclick = () => toggleImmich();
 $("btn-immich-close").onclick = () => toggleImmich(false);
 
 let immichBaseUrl = null;
+
+// The matched Immich photo, shown beside this scan's front without leaving the app (the server fetches it).
+function showImmichCompare(scan, distanceText, version) {
+  const assetId = scan.immich_duplicate_asset_id;
+  $("immich-compare").hidden = !assetId;
+  if (!assetId) { setFrameImage("immich", null); setFrameImage("match-scan", null); showImmichMatchLink(null); return; }
+  setFrameImage("match-scan", `/api/scans/${scan.id}/image/front?v=${version}`);
+  setFrameImage("immich", `/api/immich/asset/${encodeURIComponent(assetId)}/image`);
+  $("immich-compare-note").textContent = distanceText;
+  $("immich-compare-note").hidden = !distanceText;
+  showImmichMatchLink(assetId);
+}
 
 async function showImmichMatchLink(assetId) {
   const link = $("link-immich-dup");

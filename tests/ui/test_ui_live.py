@@ -1204,6 +1204,11 @@ def test_immich_chip_shows_distance_and_link_to_the_match(page, server):
         expect(link).to_be_visible()
         expect(link).to_have_attribute("href", "http://immich.test:2283/photos/asset-123")
         expect(link).to_have_attribute("target", "_blank")
+        # The match is also shown in the app, beside this scan's front, fetched through the server.
+        expect(page.locator("#immich-compare")).to_be_visible()
+        expect(page.locator("#img-immich")).to_have_attribute("src", "/api/immich/asset/asset-123/image")
+        expect(page.locator("#immich-compare-note")).to_have_text("differs by 2 of 64")
+        expect(page.locator("#img-match-scan")).to_have_attribute("src", re.compile(r"/api/scans/\d+/image/front"))
     finally:
         page.request.patch(server["base"] + "/api/immich/settings", data={"url": ""})
 
@@ -1216,6 +1221,9 @@ def test_immich_match_link_at_400px(browser, server):
     ingest(pg)
     pg.locator("#scan-list li").first.click()
     expect(pg.locator("#scan-immich-dup")).to_be_visible()
+    pg.locator("#immich-compare").scroll_into_view_if_needed()
+    expect(pg.locator("#frame-immich")).to_be_visible()
+    expect(pg.locator("#frame-match-scan")).to_be_visible()
     pg.locator("#link-immich-dup").scroll_into_view_if_needed()
     expect(pg.locator("#link-immich-dup")).to_be_visible()
     assert no_horizontal_scroll(pg), "Immich match chip/link causes horizontal scroll at 400px"

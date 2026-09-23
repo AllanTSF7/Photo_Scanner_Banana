@@ -407,6 +407,36 @@ def test_operator_immich_duplicate_flag_round_trips(client):
     assert updated["immich_duplicate_asset_id"] is None
 
 
+def test_immich_asset_image_is_served_only_for_matched_assets_and_read_only(client):
+    from banana import db
+    from banana.models import Scan
+    from tests.immich._fake_server import FakeImmichServer
+
+    asset = "6728050d-9acf-48cd-8ff9-6d86ecd10a1e"
+    c, _ = client
+    c.post("/api/ingest")
+    sid = c.get("/api/scans").json()[0]["id"]
+    server = FakeImmichServer()
+    server.thumbnails = {asset: b"\xff\xd8fake-jpeg-bytes"}
+    try:
+        c.patch("/api/immich/settings", json={"enabled": True, "url": server.url, "api_key": "k"})
+        assert c.get(f"/api/immich/asset/{asset}/image").status_code == 404  # no scan matched it: not served
+        assert c.get("/api/immich/asset/not-a-uuid/image").status_code == 404
+
+        api = sys.modules["banana.web.api"]
+        with db.session(api.engine) as session:
+            scan = session.get(Scan, sid)
+            scan.immich_duplicate_asset_id = asset
+            session.add(scan)
+            session.commit()
+        response = c.get(f"/api/immich/asset/{asset}/image")
+        assert response.status_code == 200 and response.content == b"\xff\xd8fake-jpeg-bytes"
+        assert response.headers["content-type"] == "image/jpeg"
+        assert all(request[0] == "GET" for request in server.requests)  # read-only, always
+    finally:
+        server.close()
+
+
 @pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 def test_export_approved(client):
     c, root = client

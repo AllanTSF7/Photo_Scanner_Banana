@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import secrets
 import time
 from collections import Counter
@@ -232,6 +233,36 @@ def immich_status(session: Session = Depends(get_session)) -> dict:
         return {"enabled": True, "connected": False, "asset_count": None, "error": f"Could not connect: {exc}"}
     finally:
         client.close()
+
+
+_UUID = re.compile(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+
+
+@app.get("/api/immich/asset/{asset_id}/image", tags=["immich"])
+def immich_asset_image(asset_id: str, session: Session = Depends(get_session)) -> Response:
+    """A preview of an Immich photo a scan matched, fetched read-only by the server so the browser never sees
+    the API key and the operator can compare side by side without leaving the app. Only assets that a scan or
+    export actually matched are served - this isn't a general window onto the Immich library."""
+    matched = _UUID.match(asset_id) and (
+        session.exec(select(Scan.id).where(Scan.immich_duplicate_asset_id == asset_id)).first() is not None
+        or session.exec(select(Export.id).where(
+            (Export.immich_front_id == asset_id) | (Export.immich_back_id == asset_id))).first() is not None
+    )
+    if not matched:
+        raise HTTPException(404, "no scan matched that Immich photo")
+    client = build_client(immich_settings.get_effective(session, settings))
+    if client is None:
+        raise HTTPException(409, "Immich checking isn't enabled")
+    try:
+        data = client.thumbnail_bytes(asset_id, "preview")
+    except httpx.HTTPStatusError as exc:
+        raise HTTPException(404 if exc.response.status_code == 404 else 502, "Immich couldn't provide that photo") from exc
+    except httpx.HTTPError as exc:
+        raise HTTPException(502, f"Could not reach Immich: {exc}") from exc
+    finally:
+        client.close()
+    kind = "image/webp" if data[8:12] == b"WEBP" else "image/png" if data[:4] == b"\x89PNG" else "image/jpeg"
+    return Response(data, media_type=kind, headers={"Cache-Control": "private, max-age=86400"})
 
 
 @app.post("/api/immich/check", tags=["immich"])
