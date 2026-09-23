@@ -10,6 +10,7 @@ automatically on ingest - and only when Immich checking is enabled (`banana.immi
 from __future__ import annotations
 
 import threading
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -69,7 +70,9 @@ def check_exact(client: ImmichClient, session: Session) -> ExactCheckStats:
     return stats
 
 
-def refresh_asset_hashes(client: ImmichClient, session: Session, library_id: str) -> AssetRefreshStats:
+def refresh_asset_hashes(
+    client: ImmichClient, session: Session, library_id: str, on_progress: Callable[[AssetRefreshStats], None] | None = None,
+) -> AssetRefreshStats:
     """Paginate the configured library; fetch a thumbnail and compute our own dHash only for assets that are
     new or whose checksum changed since last time, so a repeat run is cheap once the library is cached."""
     stats = AssetRefreshStats()
@@ -81,6 +84,8 @@ def refresh_asset_hashes(client: ImmichClient, session: Session, library_id: str
             break
         for asset in assets:
             stats.scanned += 1
+            if on_progress and stats.scanned % 50 == 0:
+                on_progress(stats)
             asset_id, checksum = asset["id"], asset.get("checksum")
             cached = session.get(ImmichAssetHash, asset_id)
             if cached is not None and checksum is not None and cached.checksum == checksum:
@@ -172,6 +177,10 @@ class ImmichCheckController:
         threading.Thread(target=self._work, daemon=True, name="immich-check").start()
         return self.status()
 
+    def _progress(self, stats: AssetRefreshStats) -> None:
+        with self._lock:
+            self._run.message = f"Reading the Immich library: {stats.scanned} photos looked at, {stats.refreshed} new"
+
     def _phase(self, phase: str) -> None:
         with self._lock:
             self._run.phase = phase
@@ -184,7 +193,7 @@ class ImmichCheckController:
                 with build_client(cfg) as client:  # already confirmed non-None in start()
                     exact = check_exact(client, session)
                     self._phase("assets")
-                    refreshed = refresh_asset_hashes(client, session, cfg.library_id)
+                    refreshed = refresh_asset_hashes(client, session, cfg.library_id, self._progress)
                     self._phase("matching")
                     matched = find_matches(session, self._settings)
             with self._lock:

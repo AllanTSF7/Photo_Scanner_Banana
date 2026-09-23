@@ -72,7 +72,9 @@ class ImmichClient:
         """One page of a library's assets (id/checksum/originalPath/...). Pagination field names are an
         unconfirmed assumption (`page`/`size` in the request, `items`/`nextPage` in the response) - verify
         against the real server; see module docstring."""
-        body = {"libraryId": library_id, "page": page, "size": page_size}
+        body: dict = {"page": page, "size": page_size, "type": "IMAGE"}  # videos are never compared
+        if library_id:  # blank = every image the API key can see, not one External Library
+            body["libraryId"] = library_id
         return self._post("search/metadata", json=body).json()
 
     def thumbnail_bytes(self, asset_id: str, size: str = "thumbnail") -> bytes:

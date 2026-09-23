@@ -124,7 +124,7 @@
           </div>
           <div class="field">
             <label for="immich-library-id">Library ID</label>
-            <input id="immich-library-id" type="text" placeholder="the External Library's id in Immich">
+            <input id="immich-library-id" type="text" placeholder="optional: blank checks all your photos">
           </div>
         </div>
         <label class="toggle"><input type="checkbox" id="immich-enabled"> Enabled - checks Immich when I ask</label>
@@ -169,6 +169,7 @@
             <span id="scan-dup" class="chip warn" hidden></span>
             <span id="scan-operator-dup" class="chip warn" hidden>you flagged as duplicate</span>
             <span id="scan-immich-dup" class="chip warn" hidden>in Immich?</span>
+            <a id="link-immich-dup" class="btn small" target="_blank" rel="noopener" hidden>View match in Immich</a>
             <span id="scan-operator-immich-dup" class="chip warn" hidden>you flagged as in Immich</span>
           </div>
           <span class="muted mono scan-batch" id="scan-batch"></span>

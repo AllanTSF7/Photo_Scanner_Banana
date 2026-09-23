@@ -543,7 +543,8 @@ Two independent passes, both read-only:
    every re-export.
 2. **Perceptual, our own dHash on Immich's thumbnails.** Immich's Smart Search only accepts text or an existing
    Immich asset id as a similarity anchor - there is no API to ask "is this external image similar to anything
-   in the library." So the library is enumerated via `POST /search/metadata` (paginated), each new/changed
+   in the library." So the library is enumerated via `POST /search/metadata` (paginated, `type: IMAGE` only so videos are
+   skipped, `libraryId` sent only when a Library ID is configured), each new/changed
    asset's thumbnail is fetched (`GET /assets/{id}/thumbnail`) and hashed with the same native `core.dhash`
    already used for local rescan detection, and the result is cached in `immich_asset_hash` keyed by Immich's
    reported checksum. Every scan's `dhash_hex` is then compared against the cache with `core.hamming` and

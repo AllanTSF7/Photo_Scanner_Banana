@@ -413,7 +413,11 @@ function showEditor(scan, { full = false } = {}) {
   $("btn-flag-dup").setAttribute("aria-pressed", String(!!scan.operator_duplicate));
   $("btn-flag-dup").firstChild.textContent = scan.operator_duplicate ? "Unflag duplicate" : "Flag duplicate";
   $("scan-immich-dup").hidden = !scan.immich_duplicate_asset_id;
+  const immichMatch = sug.immich_duplicate?.value;
+  $("scan-immich-dup").textContent = Number.isInteger(immichMatch?.distance)
+    ? `in Immich? (differs by ${immichMatch.distance} of 64)` : "in Immich?";
   setSuggested($("scan-immich-dup"), !!scan.immich_duplicate_asset_id && !committed);
+  showImmichMatchLink(scan.immich_duplicate_asset_id);
   $("scan-operator-immich-dup").hidden = !scan.operator_immich_duplicate;
   $("btn-flag-immich-dup").setAttribute("aria-pressed", String(!!scan.operator_immich_duplicate));
   $("btn-flag-immich-dup").firstChild.textContent = scan.operator_immich_duplicate ? "Unflag as in Immich" : "Flag as in Immich";
@@ -1153,12 +1157,31 @@ function toggleImmich(open = $("immich-panel").hidden) {
 $("btn-immich").onclick = () => toggleImmich();
 $("btn-immich-close").onclick = () => toggleImmich(false);
 
+let immichBaseUrl = null;
+
+async function showImmichMatchLink(assetId) {
+  const link = $("link-immich-dup");
+  link.hidden = true;
+  if (!assetId) return;
+  try {
+    if (immichBaseUrl === null) immichBaseUrl = ((await api("GET", "/api/immich/settings")).url || "").replace(/\/+$/, "");
+  } catch { return; }
+  if (!immichBaseUrl || state.current?.immich_duplicate_asset_id !== assetId) return;
+  link.href = `${immichBaseUrl}/photos/${encodeURIComponent(assetId)}`;
+  link.hidden = false;
+}
+
+let immichFormDirty = false;
+$("immich-settings-form").addEventListener("input", () => { immichFormDirty = true; });
+
 async function loadImmichSettings() {
   const s = await api("GET", "/api/immich/settings");
-  $("immich-url").value = s.url;
-  $("immich-library-id").value = s.library_id;
-  $("immich-enabled").checked = s.enabled;
-  $("immich-api-key").value = "";
+  if (!immichFormDirty) {  // a refresh never overwrites what the operator is typing
+    $("immich-url").value = s.url;
+    $("immich-library-id").value = s.library_id;
+    $("immich-enabled").checked = s.enabled;
+    $("immich-api-key").value = "";
+  }
   $("immich-api-key").placeholder = s.api_key_set ? `•••• ${s.api_key_last4}` : "paste a new key to change it";
   $("immich-key-state").textContent = s.api_key_set ? "A key is saved. Leave blank to keep it." : "No key saved yet.";
   renderImmichConnection(s);
@@ -1179,6 +1202,8 @@ $("immich-settings-form").addEventListener("submit", async (e) => {
   if ($("immich-api-key").value) body.api_key = $("immich-api-key").value;
   try {
     const saved = await api("PATCH", "/api/immich/settings", body);
+    immichBaseUrl = null;
+    immichFormDirty = false;
     $("immich-save-state").textContent = "Saved";
     setTimeout(() => ($("immich-save-state").textContent = ""), 2000);
     await loadImmichSettings();

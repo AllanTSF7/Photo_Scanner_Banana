@@ -1171,6 +1171,58 @@ def test_immich_chip_shows_only_for_a_flagged_scan_and_manual_flag_toggles_it(pa
     expect(page.locator("#scan-operator-immich-dup")).to_be_hidden()
 
 
+def _seed_immich_match(pg, server):
+    """Make every scan the UI loads look like the Immich check matched it (asset-123, 2 bits apart)."""
+    pg.request.patch(server["base"] + "/api/immich/settings", data={"url": "http://immich.test:2283/"})
+
+    def patch(route):
+        if route.request.method != "GET":
+            route.continue_()
+            return
+        response = route.fetch()
+        body = response.json()
+
+        def mark(scan):
+            scan["immich_duplicate_asset_id"] = "asset-123"
+            scan["suggestions"] = {**(scan.get("suggestions") or {}), "immich_duplicate": {
+                "value": {"asset_id": "asset-123", "distance": 2}, "producer": "immich-dhash@1"}}
+
+        for scan in (body if isinstance(body, list) else [body]):
+            mark(scan)
+        route.fulfill(response=response, json=body)
+
+    pg.route(re.compile(r"/api/scans(/\d+)?(\?.*)?$"), patch)
+
+
+def test_immich_chip_shows_distance_and_link_to_the_match(page, server):
+    _seed_immich_match(page, server)
+    try:
+        ingest(page)
+        page.locator("#scan-list li").first.click()
+        expect(page.locator("#scan-immich-dup")).to_have_text("in Immich? (differs by 2 of 64)")
+        link = page.locator("#link-immich-dup")
+        expect(link).to_be_visible()
+        expect(link).to_have_attribute("href", "http://immich.test:2283/photos/asset-123")
+        expect(link).to_have_attribute("target", "_blank")
+    finally:
+        page.request.patch(server["base"] + "/api/immich/settings", data={"url": ""})
+
+
+def test_immich_match_link_at_400px(browser, server):
+    context = browser.new_context(viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    _seed_immich_match(pg, server)
+    pg.goto(server["base"] + "/")
+    ingest(pg)
+    pg.locator("#scan-list li").first.click()
+    expect(pg.locator("#scan-immich-dup")).to_be_visible()
+    pg.locator("#link-immich-dup").scroll_into_view_if_needed()
+    expect(pg.locator("#link-immich-dup")).to_be_visible()
+    assert no_horizontal_scroll(pg), "Immich match chip/link causes horizontal scroll at 400px"
+    pg.request.patch(server["base"] + "/api/immich/settings", data={"url": ""})
+    context.close()
+
+
 def test_immich_check_button_disabled_until_enabled(page):
     page.click("#btn-immich")
     expect(page.locator("#btn-immich-check")).to_be_disabled()

@@ -64,6 +64,16 @@ def test_search_metadata_posts_only_to_the_allowlisted_path(server, client):
     assert [r[:2] for r in server.requests] == [("POST", "/api/search/metadata")]
 
 
+def test_search_metadata_asks_for_images_only_and_omits_a_blank_library_filter(server, client):
+    server.search_pages[1] = {"assets": {"items": [], "nextPage": None}}
+    client.search_metadata_page("lib-1", 1)
+    client.search_metadata_page("", 1)
+    with_lib, without_lib = [r[2] for r in server.requests]
+    assert with_lib["type"] == without_lib["type"] == "IMAGE"  # videos are never compared
+    assert with_lib["libraryId"] == "lib-1"
+    assert "libraryId" not in without_lib  # blank = every image the key can see
+
+
 def test_post_refuses_anything_off_the_allowlist_and_makes_no_request(server, client):
     with pytest.raises(RuntimeError, match="not on the read-only allow-list"):
         client._post("assets/some-id")

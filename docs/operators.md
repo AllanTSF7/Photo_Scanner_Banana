@@ -225,7 +225,10 @@ turn it on, and it only ever **reads** from Immich - it never uploads, edits, st
 there.
 
 **Turning it on:** open the **Immich** button in the top bar, fill in your Immich server URL, an API key
-(*Immich → Account Settings → API Keys*), and the External Library's ID, then tick **Enabled** and **Save**.
+(*Immich → Account Settings → API Keys*), then tick **Enabled** and **Save**. **Library ID** is optional: leave it blank
+to compare against every photo the key can see, or enter an External Library's ID to limit the check to that one library.
+Only photos are compared, never videos. The first run reads every photo's thumbnail (roughly 80,000 photos can take
+an hour or more); later runs only look at new or changed photos, and the message under the button shows progress.
 Use **Test connection** to check the details work before relying on it. The key is never shown again once
 saved - only its last 4 characters, so you can tell which key is in use.
 
