@@ -1223,6 +1223,33 @@ def test_immich_match_link_at_400px(browser, server):
     context.close()
 
 
+def _fake_running_check(pg):
+    body = {"state": "running", "phase": "assets", "done": 1234, "total": 83639,
+            "message": "Reading the Immich library: 1234 photos looked at, 1234 new", "stats": None}
+    pg.route("**/api/immich/check/status", lambda route: route.fulfill(json=body))
+
+
+def test_immich_progress_bar_shows_photos_read_out_of_the_total(page):
+    _fake_running_check(page)
+    page.click("#btn-immich")
+    expect(page.locator("#immich-progress-wrap")).to_be_visible()
+    expect(page.locator("#immich-progress-text")).to_have_text("1,234 of 83,639 photos (1%)")
+    assert page.eval_on_selector("#immich-progress", "e => [e.value, e.max]") == [1234, 83639]
+    expect(page.locator("#btn-immich-check")).to_be_disabled()  # one check at a time
+
+
+def test_immich_progress_bar_at_400px(browser, server):
+    context = browser.new_context(viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    _fake_running_check(pg)
+    pg.goto(server["base"] + "/")
+    pg.click("#btn-immich")
+    expect(pg.locator("#immich-progress")).to_be_visible()
+    expect(pg.locator("#immich-progress-text")).to_be_visible()
+    assert no_horizontal_scroll(pg), "Immich progress bar causes horizontal scroll at 400px"
+    context.close()
+
+
 def test_immich_check_button_disabled_until_enabled(page):
     page.click("#btn-immich")
     expect(page.locator("#btn-immich-check")).to_be_disabled()

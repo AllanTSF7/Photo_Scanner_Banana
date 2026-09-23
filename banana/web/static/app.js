@@ -1152,6 +1152,7 @@ function toggleImmich(open = $("immich-panel").hidden) {
     toggleHealth(false);
     toggleLearning(false);
     loadImmichSettings();
+    resumeImmichCheckDisplay().catch(() => {});
   }
 }
 $("btn-immich").onclick = () => toggleImmich();
@@ -1221,6 +1222,48 @@ $("btn-immich-test").onclick = () => withButton($("btn-immich-test"), async () =
 });
 
 let immichCheckPoll = null;
+
+function renderImmichProgress(status) {
+  const wrap = $("immich-progress-wrap");
+  const reading = status.state === "running" && status.phase === "assets";
+  wrap.hidden = !(reading || (status.state === "done" && status.total));
+  if (wrap.hidden) return;
+  const total = status.total || 0;
+  const done = status.state === "done" ? total || status.done : Math.min(status.done, total || status.done);
+  $("immich-progress").max = Math.max(total, done, 1);
+  $("immich-progress").value = done;
+  $("immich-progress-text").textContent = total
+    ? `${done.toLocaleString()} of ${total.toLocaleString()} photos (${Math.floor((100 * done) / total)}%)`
+    : `${done.toLocaleString()} photos`;
+}
+
+function pollImmichCheck() {
+  clearInterval(immichCheckPoll);
+  const tick = async () => {
+    const status = await api("GET", "/api/immich/check/status");
+    $("immich-check-message").textContent = status.message || (status.state === "running" ? "Checking…" : "");
+    renderImmichProgress(status);
+    $("btn-immich-check").disabled = status.state === "running";
+    if (status.state !== "running") { clearInterval(immichCheckPoll); immichCheckPoll = null; }
+    return status;
+  };
+  immichCheckPoll = setInterval(async () => {
+    const status = await tick();
+    if (status.state === "done") { toast("Immich check finished"); await refresh(); }
+    else if (status.state === "failed") toast(status.message || "Immich check failed", true);
+  }, 1000);
+}
+
+// Opening the panel while a check is already running (started earlier, or from another tab) picks its progress up.
+async function resumeImmichCheckDisplay() {
+  const status = await api("GET", "/api/immich/check/status");
+  renderImmichProgress(status);
+  if (status.state === "running") {
+    $("immich-check-message").textContent = status.message || "Checking…";
+    if (!immichCheckPoll) pollImmichCheck();
+  }
+}
+
 $("btn-immich-check").onclick = () => withButton($("btn-immich-check"), async () => {
   const ok = await confirmAction({
     title: "Check Immich for duplicates?",
@@ -1234,16 +1277,7 @@ $("btn-immich-check").onclick = () => withButton($("btn-immich-check"), async ()
     toast(e.message, true);
     return;
   }
-  clearInterval(immichCheckPoll);
-  immichCheckPoll = setInterval(async () => {
-    const status = await api("GET", "/api/immich/check/status");
-    $("immich-check-message").textContent = status.message || (status.state === "running" ? "Checking…" : "");
-    if (status.state !== "running") {
-      clearInterval(immichCheckPoll);
-      if (status.state === "done") { toast("Immich check finished"); await refresh(); }
-      else if (status.state === "failed") toast(status.message || "Immich check failed", true);
-    }
-  }, 1000);
+  pollImmichCheck();
 });
 
 // ---------- dev live reload (only when the server runs with BANANA_DEV_RELOAD=1) ----------

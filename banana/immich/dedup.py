@@ -168,6 +168,8 @@ class CheckRun:
     finished_at: str | None = None
     message: str = ""
     stats: dict | None = None
+    done: int = 0  # library photos read so far, and how many Immich says there are (for the progress bar)
+    total: int | None = None
 
 
 class ImmichCheckController:
@@ -204,6 +206,7 @@ class ImmichCheckController:
 
     def _progress(self, stats: AssetRefreshStats) -> None:
         with self._lock:
+            self._run.done = stats.scanned
             self._run.message = f"Reading the Immich library: {stats.scanned} photos looked at, {stats.refreshed} new"
 
     def _phase(self, phase: str) -> None:
@@ -218,11 +221,17 @@ class ImmichCheckController:
                 with build_client(cfg) as client:  # already confirmed non-None in start()
                     exact = check_exact(client, session)
                     self._phase("assets")
+                    try:
+                        images = client.statistics().get("images")
+                        with self._lock:
+                            run.total = int(images) if images is not None else None
+                    except Exception:  # noqa: BLE001 - the bar is a nicety; the check itself doesn't need the total
+                        pass
                     refreshed = refresh_asset_hashes(client, session, cfg.library_id, self._progress)
                     self._phase("matching")
                     matched = find_matches(session, self._settings)
             with self._lock:
-                run.state, run.phase = "done", None
+                run.state, run.phase, run.done = "done", None, refreshed.scanned
                 run.stats = {
                     "exports_checked": exact.checked, "exports_matched": exact.matched,
                     "assets_scanned": refreshed.scanned, "assets_refreshed": refreshed.refreshed,

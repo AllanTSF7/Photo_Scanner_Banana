@@ -402,3 +402,7 @@ input[data-state="suggested"], textarea[data-state="suggested"] { border-style: 
 .driver-popover.photo-scanner-tour .driver-popover-arrow-side-right.driver-popover-arrow { border-right-color: var(--surface-overlay); }
 .driver-popover.photo-scanner-tour .driver-popover-arrow-side-top.driver-popover-arrow { border-top-color: var(--surface-overlay); }
 .driver-popover.photo-scanner-tour .driver-popover-arrow-side-bottom.driver-popover-arrow { border-bottom-color: var(--surface-overlay); }
+
+.immich-progress { display: flex; align-items: center; gap: var(--space-3); margin-block: var(--space-3); }
+.immich-progress progress { flex: 1; min-width: 0; height: var(--space-3); accent-color: var(--accent); }
+.immich-progress span { font-size: var(--text-sm); white-space: nowrap; }
