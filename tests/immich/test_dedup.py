@@ -125,6 +125,27 @@ def test_find_matches_flags_a_perceptually_similar_scan(env, server):
         assert rejected.immich_duplicate_asset_id is None  # excluded from the check
 
 
+def test_find_matches_sees_through_a_scan_that_was_fed_upside_down(env, tmp_path):
+    settings, engine = env
+    ramp = np.tile(np.linspace(20, 235, 120, dtype=np.uint8), (80, 1))  # darker on the left
+    ramp[10:30, 5:40] = 250  # bright block, top left
+    upright = Image.fromarray(ramp).convert("RGB")
+    upside_down = upright.rotate(180)
+    path = tmp_path / "front.jpg"
+    upside_down.save(path)
+    upright_hash = core.dhash(np.asarray(upright.convert("L")))
+    upside_down_hash = core.dhash(np.asarray(upside_down.convert("L")))
+    assert core.hamming(upright_hash, upside_down_hash) > 20  # premise: unrotated fingerprints really differ
+
+    with db.session(engine) as session:
+        session.add(ImmichAssetHash(asset_id="a1", checksum="c1", dhash_hex=f"{upright_hash:016x}"))
+        session.add(Scan(id=1, batch_id=1, source_key="s1", front_path=str(path), front_rotation=180,
+                          dhash_hex=f"{upside_down_hash:016x}", status=ScanStatus.NEEDS_REVIEW.value))
+        session.commit()
+        assert find_matches(session, settings).matched == 1
+        assert session.get(Scan, 1).immich_duplicate_asset_id == "a1"
+
+
 def test_find_matches_is_a_no_op_with_no_cached_hashes(env):
     settings, engine = env
     with db.session(engine) as session:

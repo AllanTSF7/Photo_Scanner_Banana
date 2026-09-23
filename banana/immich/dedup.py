@@ -13,7 +13,9 @@ import threading
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
 
+import numpy as np
 from sqlmodel import Session, select
 
 from banana import core, db, imaging
@@ -107,23 +109,46 @@ def refresh_asset_hashes(
     return stats
 
 
+def _scan_fingerprints(scan: Scan) -> list[int]:
+    """The scan's dHash at 0/90/180/270 degrees. The stored `dhash_hex` is taken from the unrotated crop (it has
+    to stay that way for local rescan detection), but Immich's copy of a photo is upright, and a scan fed
+    through the feeder sideways or upside down matches it only when turned the same way."""
+    stored = int(scan.dhash_hex, 16)
+    try:
+        crop = tuple(scan.front_crop) if scan.front_crop else None
+        gray = imaging.analysis_gray(Path(scan.front_path), imaging.Edit(crop, 0), 512)
+    except Exception:  # noqa: BLE001 - file gone or unreadable: fall back to the stored, unrotated fingerprint
+        return [stored]
+    return [stored] + [core.dhash(np.ascontiguousarray(np.rot90(gray, k))) for k in (1, 2, 3)]
+
+
+def _distances(asset_hashes: np.ndarray, value: int) -> np.ndarray:
+    """Hamming distance from `value` to every asset hash at once (83k+ assets per scan, so not a Python loop)."""
+    xor = asset_hashes ^ np.uint64(value)
+    return np.unpackbits(xor.view(np.uint8).reshape(-1, 8), axis=1).sum(axis=1)
+
+
 def find_matches(session: Session, settings: Settings) -> MatchStats:
-    """Compare every (non-rejected) scan's own dHash against the cached Immich asset hashes - the same
-    algorithm and threshold already used for local rescan detection (banana/ingest/service.py::analyze_scan),
-    just against a different pool. Never auto-applied: only ever recorded as a suggestion."""
+    """Compare every (non-rejected) scan's own dHash - at all four rotations - against the cached Immich asset
+    hashes, with the same algorithm and threshold already used for local rescan detection
+    (banana/ingest/service.py::analyze_scan), just against a different pool. Never auto-applied: only ever
+    recorded as a suggestion."""
     stats = MatchStats()
     hashes = list(session.exec(select(ImmichAssetHash).where(ImmichAssetHash.dhash_hex.is_not(None))))
     if not hashes:
         return stats
+    asset_ids = [h.asset_id for h in hashes]
+    asset_hashes = np.array([int(h.dhash_hex, 16) for h in hashes], dtype=np.uint64)
     produced = corrections.producers(settings)["immich_duplicate"]
     scans = session.exec(select(Scan).where(Scan.dhash_hex.is_not(None), Scan.status != ScanStatus.REJECTED.value))
     for scan in scans:
-        value = int(scan.dhash_hex, 16)
         best: tuple[str, int] | None = None
-        for asset in hashes:
-            d = core.hamming(value, int(asset.dhash_hex, 16))
+        for value in _scan_fingerprints(scan):
+            distances = _distances(asset_hashes, value)
+            i = int(distances.argmin())
+            d = int(distances[i])
             if d <= settings.analysis.dhash_max_distance and (best is None or d < best[1]):
-                best = (asset.asset_id, d)
+                best = (asset_ids[i], d)
         if best is None:
             continue
         asset_id, distance = best
