@@ -3,8 +3,15 @@
 from __future__ import annotations
 
 import importlib
+import sys
+
+import pytest
 
 import banana.desktop as desktop
+
+# Windows-only by design: _user_docs_root()/_data_home() build Windows-style paths (SYSTEMDRIVE,
+# LOCALAPPDATA), which pathlib's POSIX semantics can't round-trip correctly on Linux/macOS.
+pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="banana.desktop targets the Windows packaged build only")
 
 
 def _reload_with_env(monkeypatch, tmp_path):
