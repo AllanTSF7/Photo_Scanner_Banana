@@ -33,6 +33,10 @@ async function api(method, url, body) {
     headers: body ? { "Content-Type": "application/json" } : {},
     body: body ? JSON.stringify(body) : undefined,
   });
+  if (res.status === 401) {  // session expired or signed out elsewhere
+    location.replace("/login");
+    throw new Error("Signed out");
+  }
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail ?? detail; } catch { /* not JSON */ }
@@ -1292,6 +1296,13 @@ $("btn-immich-check").onclick = () => withButton($("btn-immich-check"), async ()
   }
   pollImmichCheck();
 });
+
+// ---------- account ----------
+api("GET", "/api/auth/me").then((me) => { $("user-chip").textContent = me.username; }).catch(() => {});
+$("btn-logout").onclick = async () => {
+  try { await api("POST", "/api/auth/logout"); } catch { /* already signed out */ }
+  location.replace("/login");
+};
 
 // ---------- dev live reload (only when the server runs with BANANA_DEV_RELOAD=1) ----------
 (async function devReload() {

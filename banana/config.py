@@ -89,7 +89,18 @@ class ImmichConfig(BaseModel):
     import_path_prefix: str = "/mnt/photo_vault/sorted"
 
 
+class AuthConfig(BaseModel):
+    # Host headers the app answers to. Anything else is refused, which blocks DNS-rebinding attacks from a
+    # web page. Add the server's Tailscale IP and name here on the server.
+    allowed_hosts: list[str] = ["127.0.0.1", "localhost", "::1"]
+    session_days: int = 30
+    # A first-run "create the first account" page, open only while no account exists. Desktop builds turn it
+    # on (loopback on a personal PC); on a shared server leave it off and use `banana user add`.
+    setup_page: bool = False
+
+
 class Settings(BaseModel):
+    auth: AuthConfig = AuthConfig()
     paths: PathsConfig = PathsConfig()
     pairing: PairingConfig = PairingConfig()
     analysis: AnalysisConfig = AnalysisConfig()

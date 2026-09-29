@@ -21,15 +21,20 @@ def client(tmp_path, monkeypatch):
     config.write_text(
         "[paths]\n" + "".join(f'{n} = "{(tmp_path / n).as_posix()}"\n' for n in ("inbox", "archive", "sorted")) +
         f'data_dir = "{(tmp_path / "data").as_posix()}"\n'
-        "[analysis]\nread_text = false\n",  # OCR has its own tests; keeps these fast
+        "[analysis]\nread_text = false\n"  # OCR has its own tests; keeps these fast
+        '[auth]\nallowed_hosts = ["testserver"]\n',
         encoding="utf-8",
     )
     monkeypatch.setenv("BANANA_CONFIG", str(config))
     make_demo_inbox.main(tmp_path / "inbox")
     import banana.web.api as api
+    from banana import auth, db
 
     api = importlib.reload(api)
+    with db.session(api.engine) as session:
+        auth.create_user(session, "tester", "correct horse battery")
     with TestClient(api.app) as c:
+        assert c.post("/api/auth/login", json={"username": "tester", "password": "correct horse battery"}).status_code == 200
         yield c, tmp_path
 
 
@@ -310,35 +315,123 @@ def test_repair_dangling_duplicate_groups(client):
         assert repair_dangling_duplicate_groups(session) == 0
 
 
-def test_demo_password_protects_everything(client, monkeypatch):
-    import base64
-    import importlib
+def _anonymous():
+    return TestClient(sys.modules["banana.web.api"].app)
 
-    import banana.web.api as api
-    from fastapi.testclient import TestClient
+
+def test_everything_but_the_public_paths_needs_a_signed_in_session(client):
+    c, _ = client
+    with _anonymous() as anon:
+        for path in ("/api/scans", "/api/summary", "/api/immich/settings", "/docs", "/openapi.json"):
+            assert anon.get(path).status_code == 401, path
+        home = anon.get("/", follow_redirects=False)
+        assert home.status_code == 303 and home.headers["location"] == "/login"
+        assert anon.post("/api/export").status_code == 401
+        assert anon.post("/api/ingest").status_code == 401
+        assert anon.delete("/api/scans/1").status_code == 401
+        assert anon.patch("/api/immich/settings", json={"url": "http://evil.example"}).status_code == 401
+        for path in ("/health", "/login", "/static/app.css", "/static/login.js", "/api/auth/state"):
+            assert anon.get(path).status_code == 200, path
+    assert c.get("/api/scans").status_code == 200
+    assert c.get("/api/auth/me").json() == {"username": "tester"}
+
+
+def test_wrong_password_is_refused_and_repeated_failures_are_throttled(client):
+    with _anonymous() as anon:
+        assert anon.post("/api/auth/login", json={"username": "tester", "password": "nope-nope"}).status_code == 401
+        assert anon.post("/api/auth/login", json={"username": "nobody", "password": "nope-nope"}).status_code == 401
+        for _ in range(8):
+            anon.post("/api/auth/login", json={"username": "tester", "password": "nope-nope"})
+        right = anon.post("/api/auth/login", json={"username": "tester", "password": "correct horse battery"})
+        assert right.status_code == 429  # even the right password waits out the lockout
+
+
+def test_sign_out_ends_the_session(client):
+    c, _ = client
+    assert c.post("/api/auth/logout").status_code == 200
+    assert c.get("/api/scans").status_code == 401
+
+
+def test_disabling_a_user_signs_them_out_and_blocks_sign_in(client):
+    from banana import auth, db
 
     c, _ = client
-    assert c.get("/health").status_code == 200  # no password configured: open, as before
+    api = sys.modules["banana.web.api"]
+    with db.session(api.engine) as session:
+        auth.set_disabled(session, "tester", True)
+    assert c.get("/api/scans").status_code == 401
+    assert c.post("/api/auth/login", json={"username": "tester", "password": "correct horse battery"}).status_code == 401
 
-    monkeypatch.setenv("BANANA_DEMO_PASSWORD", "correct horse")
-    protected = importlib.reload(api)
-    try:
-        with TestClient(protected.app) as demo:
-            for path in ("/", "/health", "/api/scans", "/static/app.css", "/docs"):
-                response = demo.get(path)
-                assert response.status_code == 401, path
-                assert response.headers["www-authenticate"].startswith("Basic")
 
-            def auth(password):
-                return {"Authorization": "Basic " + base64.b64encode(f"anyone:{password}".encode()).decode()}
+def test_unknown_host_is_refused_to_block_dns_rebinding(client):
+    c, _ = client
+    assert c.get("/api/scans", headers={"Host": "evil.example:8420"}).status_code == 400
+    assert c.get("/health", headers={"Host": "evil.example"}).status_code == 400
 
-            assert demo.get("/api/scans", headers=auth("wrong")).status_code == 401
-            assert demo.get("/api/scans", headers={"Authorization": "Basic !!notbase64"}).status_code == 401
-            assert demo.get("/api/scans", headers=auth("correct horse")).status_code == 200
-            assert demo.get("/", headers=auth("correct horse")).status_code == 200
-    finally:
-        monkeypatch.delenv("BANANA_DEMO_PASSWORD")
-        importlib.reload(api)
+
+def test_cross_site_writes_are_refused_even_when_signed_in(client):
+    c, _ = client
+    assert c.post("/api/ingest", headers={"Origin": "http://evil.example"}).status_code == 403
+    assert c.post("/api/auth/logout", headers={"Origin": "null"}).status_code == 403
+    assert c.post("/api/ingest", headers={"Origin": "http://testserver"}).status_code == 200  # same site
+
+
+def test_session_cookie_is_httponly_strict_and_only_its_hash_is_stored(client):
+    from sqlmodel import select
+
+    from banana import db
+    from banana.models import AuthSession
+
+    with _anonymous() as anon:
+        response = anon.post("/api/auth/login", json={"username": "tester", "password": "correct horse battery"})
+        cookie = response.headers["set-cookie"].lower()
+        assert "httponly" in cookie and "samesite=strict" in cookie
+        token = response.cookies["ps_session"]
+    api = sys.modules["banana.web.api"]
+    with db.session(api.engine) as session:
+        stored = [row.token_hash for row in session.exec(select(AuthSession))]
+    assert token not in stored and all(len(h) == 64 for h in stored)
+
+
+def test_first_account_setup_is_closed_by_default(client):
+    with _anonymous() as anon:
+        assert anon.get("/api/auth/state").json() == {"setup_open": False, "username": None}
+        assert anon.post("/api/auth/setup", json={"username": "mallory", "password": "long enough pw"}).status_code == 403
+
+
+def test_first_account_setup_works_once_when_enabled(tmp_path, monkeypatch):
+    for name in ("inbox", "archive", "sorted", "data"):
+        (tmp_path / name).mkdir()
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[paths]\n" + "".join(f'{n} = "{(tmp_path / n).as_posix()}"\n' for n in ("inbox", "archive", "sorted"))
+        + f'data_dir = "{(tmp_path / "data").as_posix()}"\n'
+        + '[auth]\nallowed_hosts = ["testserver"]\nsetup_page = true\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BANANA_CONFIG", str(config))
+    import banana.web.api as api
+
+    api = importlib.reload(api)
+    with TestClient(api.app) as first:
+        assert first.get("/api/auth/state").json()["setup_open"] is True
+        assert first.post("/api/auth/setup", json={"username": "Allan", "password": "short"}).status_code == 422
+        assert first.post("/api/auth/setup", json={"username": "Allan", "password": "long enough pw"}).status_code == 200
+        assert first.get("/api/auth/me").json() == {"username": "allan"}  # usernames are lower-cased
+    with TestClient(api.app) as second:
+        assert second.get("/api/auth/state").json()["setup_open"] is False
+        assert second.post("/api/auth/setup", json={"username": "mallory", "password": "long enough pw"}).status_code == 403
+
+
+def test_passwords_are_hashed_and_verified():
+    from banana import auth
+
+    stored = auth.hash_password("correct horse battery")
+    assert "correct horse" not in stored and stored.startswith("scrypt$")
+    assert auth.verify_password("correct horse battery", stored)
+    assert not auth.verify_password("correct horse batterY", stored)
+    assert not auth.verify_password("anything", "not-a-hash")
+    assert auth.hash_password("same") != auth.hash_password("same")  # salted
 
 
 def test_dev_reload_token_disabled_without_env(client, monkeypatch):

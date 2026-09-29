@@ -1,22 +1,22 @@
 from __future__ import annotations
 
-import base64
 import os
 import re
-import secrets
+import threading
 import time
-from collections import Counter
+from collections import Counter, deque
 from pathlib import Path
 from typing import Literal
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sqlmodel import Session, select
 
-from banana import __version__, core, db
+from banana import __version__, auth, core, db
 from banana import health as health_checks
 from banana.analysis import autocorrect
 from banana.analysis.date_parse import find_dates
@@ -54,28 +54,44 @@ app.mount("/static", StaticFiles(directory=STATIC), name="static")
 scans = sane.ScanController(settings.scanner, settings.paths.inbox)
 immich_check = ImmichCheckController(engine, settings)
 
-# Demo password (e.g. for a temporary public tunnel): when BANANA_DEMO_PASSWORD is set, every request
-# (UI, API, images, docs) needs HTTP Basic auth with that password. Any username is accepted.
-DEMO_PASSWORD = os.environ.get("BANANA_DEMO_PASSWORD") or None
+# Every request goes through one gate (banana/auth.py has the account and session logic):
+#  - Host must be one this app answers to: blocks DNS rebinding (a web page whose name resolves to us).
+#  - A state-changing request that carries an Origin must come from this same host: blocks CSRF from other
+#    sites. Non-browser clients send no Origin and are unaffected.
+#  - Everything except the public paths below needs a signed-in session.
+_PUBLIC_PATHS = {"/health", "/login", "/api/auth/login", "/api/auth/setup", "/api/auth/state", "/api/dev/reload-token"}
+_UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
+_API_PREFIXES = ("/api/", "/docs", "/redoc", "/openapi.json")
+_ALLOWED_HOSTS = {h.strip("[]").lower() for h in settings.auth.allowed_hosts}
 
-if DEMO_PASSWORD:
 
-    @app.middleware("http")
-    async def require_demo_password(request: Request, call_next):
-        header = request.headers.get("authorization", "")
-        authorized = False
-        if header[:6].lower() == "basic ":
-            try:
-                _, _, password = base64.b64decode(header[6:]).decode("utf-8").partition(":")
-                authorized = secrets.compare_digest(password.encode(), DEMO_PASSWORD.encode())
-            except (ValueError, UnicodeDecodeError):
-                authorized = False
-        if not authorized:
-            return Response(
-                "Photo Scanner demo: password required.", status_code=401,
-                headers={"WWW-Authenticate": 'Basic realm="Photo Scanner demo", charset="UTF-8"'},
-            )
+def _host_name(host_header: str) -> str:
+    host = host_header.strip().lower()
+    if host.startswith("["):  # [::1]:8420
+        return host[1:host.find("]")] if "]" in host else host
+    return host.rsplit(":", 1)[0] if host.count(":") == 1 else host
+
+
+@app.middleware("http")
+async def security_gate(request: Request, call_next):
+    host_header = request.headers.get("host", "")
+    if _host_name(host_header) not in _ALLOWED_HOSTS:
+        return PlainTextResponse("Unknown host. Add it to [auth] allowed_hosts in config.toml.", status_code=400)
+    if request.method in _UNSAFE_METHODS:
+        origin = request.headers.get("origin")
+        if origin is not None and urlsplit(origin).netloc.lower() != host_header.lower():
+            return PlainTextResponse("Cross-site request refused.", status_code=403)
+    path = request.url.path
+    if path in _PUBLIC_PATHS or path.startswith("/static/"):
         return await call_next(request)
+    with db.session(engine) as session:
+        user = auth.resolve_session(session, request.cookies.get(auth.COOKIE_NAME))
+    if user is None:
+        if path.startswith(_API_PREFIXES):
+            return JSONResponse({"detail": "sign in required"}, status_code=401)
+        return RedirectResponse("/login", status_code=303)
+    request.state.username = user.username
+    return await call_next(request)
 
 
 def get_session():
@@ -127,6 +143,91 @@ def dev_reload_token() -> dict:
 @app.get("/", include_in_schema=False)
 def index() -> FileResponse:
     return FileResponse(STATIC / "index.html")
+
+
+@app.get("/login", include_in_schema=False)
+def login_page() -> FileResponse:
+    return FileResponse(STATIC / "login.html")
+
+
+class Credentials(BaseModel):
+    username: str
+    password: str
+
+
+# Failed sign-ins per client address: after _MAX_FAILURES within _FAILURE_WINDOW seconds, refuse for the rest
+# of the window. scrypt already makes each guess slow; this caps how many guesses a client gets.
+_MAX_FAILURES, _FAILURE_WINDOW = 10, 600
+_failures: dict[str, deque] = {}
+_failures_lock = threading.Lock()
+
+
+def _throttled(client: str) -> bool:
+    with _failures_lock:
+        recent = _failures.setdefault(client, deque())
+        while recent and recent[0] < time.monotonic() - _FAILURE_WINDOW:
+            recent.popleft()
+        return len(recent) >= _MAX_FAILURES
+
+
+def _record_failure(client: str) -> None:
+    with _failures_lock:
+        _failures.setdefault(client, deque()).append(time.monotonic())
+
+
+def _signed_in(response: Response, session: Session, user) -> dict:
+    token = auth.create_session(session, user, settings.auth.session_days)
+    response.set_cookie(
+        auth.COOKIE_NAME, token, max_age=settings.auth.session_days * 86400,
+        httponly=True, samesite="strict", path="/",
+    )
+    return {"username": user.username}
+
+
+@app.get("/api/auth/state", tags=["auth"])
+def auth_state(request: Request, session: Session = Depends(get_session)) -> dict:
+    """Public: whether the first-account setup is open, and who (if anyone) this browser is signed in as."""
+    user = auth.resolve_session(session, request.cookies.get(auth.COOKIE_NAME))
+    return {
+        "setup_open": settings.auth.setup_page and not auth.any_users(session),
+        "username": user.username if user else None,
+    }
+
+
+@app.post("/api/auth/login", tags=["auth"])
+def auth_login(body: Credentials, request: Request, response: Response, session: Session = Depends(get_session)) -> dict:
+    client = request.client.host if request.client else "unknown"
+    if _throttled(client):
+        raise HTTPException(429, "Too many failed sign-ins. Wait 10 minutes and try again.")
+    user = auth.authenticate(session, body.username, body.password)
+    if user is None:
+        _record_failure(client)
+        raise HTTPException(401, "Wrong username or password.")
+    return _signed_in(response, session, user)
+
+
+@app.post("/api/auth/setup", tags=["auth"])
+def auth_setup(body: Credentials, response: Response, session: Session = Depends(get_session)) -> dict:
+    """Create the first account. Only while setup is enabled in config and no account exists yet."""
+    if not settings.auth.setup_page or auth.any_users(session):
+        raise HTTPException(403, "Setup is closed. Ask an administrator to create your account.")
+    try:
+        user = auth.create_user(session, body.username, body.password)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
+    return _signed_in(response, session, user)
+
+
+@app.post("/api/auth/logout", tags=["auth"])
+def auth_logout(request: Request, response: Response, session: Session = Depends(get_session)) -> dict:
+    auth.end_session(session, request.cookies.get(auth.COOKIE_NAME))
+    response.delete_cookie(auth.COOKIE_NAME, path="/")
+    return {"ok": True}
+
+
+@app.get("/api/auth/me", tags=["auth"])
+def auth_me(request: Request) -> dict:
+    return {"username": request.state.username}
 
 
 @app.get("/health", tags=["system"])

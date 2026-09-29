@@ -406,3 +406,10 @@ input[data-state="suggested"], textarea[data-state="suggested"] { border-style: 
 .immich-progress { display: flex; align-items: center; gap: var(--space-3); margin-block: var(--space-3); }
 .immich-progress progress { flex: 1; min-width: 0; height: var(--space-3); accent-color: var(--accent); }
 .immich-progress span { font-size: var(--text-sm); white-space: nowrap; }
+
+/* Sign-in page */
+.login-page { align-items: center; justify-content: center; padding: var(--space-4); }
+.login-wrap { width: 100%; max-width: 26rem; }
+.login-card h1 { margin: 0; font-size: var(--text-lg); }
+.login-error { margin: 0; color: var(--text-primary); border-left: var(--border-w) solid var(--status-fail); padding-left: var(--space-3); }
+.user-chip { font-size: var(--text-sm); }

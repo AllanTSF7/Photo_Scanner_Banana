@@ -168,6 +168,28 @@ class ImmichSetting(SQLModel, table=True):
     updated_at: datetime = Field(default_factory=utcnow)
 
 
+class User(SQLModel, table=True):
+    """An operator login. Passwords are stored only as scrypt hashes (banana/auth.py)."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    username: str = Field(index=True, unique=True)
+    password_hash: str
+    disabled: bool = False
+    created_at: datetime = Field(default_factory=utcnow)
+
+
+class AuthSession(SQLModel, table=True):
+    """A signed-in browser. Only the SHA-256 of the cookie token is stored, so a copied database can't be
+    used to impersonate anyone, and deleting the row signs that browser out."""
+
+    __tablename__ = "auth_session"
+
+    token_hash: str = Field(primary_key=True)
+    user_id: int = Field(foreign_key="user.id", index=True)
+    created_at: datetime = Field(default_factory=utcnow)
+    expires_at: datetime
+
+
 class ImmichAssetHash(SQLModel, table=True):
     """One cached dHash per Immich asset (banana/immich/dedup.py), keyed by Immich's own reported checksum so
     a re-run only re-fetches/re-hashes assets that actually changed."""

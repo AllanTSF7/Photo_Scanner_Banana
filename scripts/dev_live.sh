@@ -26,6 +26,11 @@ archive = "$WIN_ROOT/archive"
 sorted = "$WIN_ROOT/library"
 data_dir = "$STATE/data"
 
+[auth]
+# Local dev: first visit offers "create the first account". Add your LAN IP here to open it from other devices.
+setup_page = true
+allowed_hosts = ["127.0.0.1", "localhost", "${BANANA_ALLOWED_HOST:-127.0.0.1}"]
+
 [scanner]
 host = "${BANANA_SCANNER_HOST:-192.168.16.178}"
 EOF

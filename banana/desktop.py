@@ -29,6 +29,10 @@ data_dir = "{data_dir}"
 [exiftool]
 path = "{exiftool}"
 
+[auth]
+# The first launch offers a "create the first account" page; it closes as soon as one account exists.
+setup_page = true
+
 [scanner]
 # Filled in automatically: on every launch the app looks the Epson up by name on the network and updates
 # this if the scanner's address changed. Scanning uses Epson's own driver (Epson Scan 2), which must be installed.
@@ -117,6 +121,15 @@ def _set_scanner_host(config_text: str, host: str) -> str:
     return "".join(lines)
 
 
+def _ensure_auth_section(config_path: Path) -> None:
+    """Configs written by builds from before accounts existed have no [auth] section; without the setup page
+    the operator of a desktop install would have no way to create the first account. Only adds a missing
+    section - an operator's own [auth] settings are never changed."""
+    text = config_path.read_text(encoding="utf-8")
+    if not any(line.strip() == "[auth]" for line in text.splitlines()):
+        config_path.write_text(text.rstrip("\n") + "\n\n[auth]\nsetup_page = true\n", encoding="utf-8")
+
+
 def _ensure_scanner_host(config_path: Path, find=None) -> str | None:
     """Keep a configured scanner address that answers; otherwise look the scanner up by name on the
     network (mDNS) and write the address it's at now. Returns the host in use, or None."""
@@ -167,6 +180,7 @@ def main() -> None:
         return
 
     config_path = _ensure_config(app_dir)
+    _ensure_auth_section(config_path)
     try:
         _ensure_scanner_host(config_path)
     except Exception:  # noqa: BLE001 - a scanner lookup failure must never stop the app from starting

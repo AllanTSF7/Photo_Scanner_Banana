@@ -59,8 +59,89 @@ def repair_duplicates(config: Path | None = typer.Option(None)) -> None:
     typer.echo(f"{changed} scan(s) repaired" if changed else "nothing to repair")
 
 
+users = typer.Typer(no_args_is_help=True, help="Operator accounts")
+cli.add_typer(users, name="user")
+
+
+def _read_password(password_stdin: bool) -> str:
+    if password_stdin:
+        import sys
+
+        return sys.stdin.readline().rstrip("\r\n")
+    return typer.prompt("Password", hide_input=True, confirmation_prompt=True)
+
+
+def _user_session(config: Path | None):
+    return db.session(db.make_engine(load_settings(config).db_path))
+
+
+@users.command("add")
+def user_add(
+    username: str,
+    password_stdin: bool = typer.Option(False, help="Read the password from stdin instead of prompting"),
+    config: Path | None = typer.Option(None),
+) -> None:
+    """Create an account. Prompts for the password so it never lands in shell history."""
+    from banana import auth
+
+    with _user_session(config) as session:
+        try:
+            user = auth.create_user(session, username, _read_password(password_stdin))
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"created {user.username}")
+
+
+@users.command("passwd")
+def user_passwd(
+    username: str,
+    password_stdin: bool = typer.Option(False, help="Read the password from stdin instead of prompting"),
+    config: Path | None = typer.Option(None),
+) -> None:
+    """Set a new password (signs that user out everywhere)."""
+    from banana import auth
+
+    with _user_session(config) as session:
+        try:
+            auth.set_password(session, username, _read_password(password_stdin))
+        except ValueError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    typer.echo(f"password changed for {username}")
+
+
+@users.command("disable")
+def user_disable(username: str, config: Path | None = typer.Option(None)) -> None:
+    """Block an account and sign it out everywhere."""
+    from banana import auth
+
+    with _user_session(config) as session:
+        auth.set_disabled(session, username, True)
+    typer.echo(f"disabled {username}")
+
+
+@users.command("enable")
+def user_enable(username: str, config: Path | None = typer.Option(None)) -> None:
+    from banana import auth
+
+    with _user_session(config) as session:
+        auth.set_disabled(session, username, False)
+    typer.echo(f"enabled {username}")
+
+
+@users.command("list")
+def user_list(config: Path | None = typer.Option(None)) -> None:
+    from sqlmodel import select
+
+    from banana.models import User
+
+    with _user_session(config) as session:
+        for user in session.exec(select(User).order_by(User.username)):
+            typer.echo(f"{user.username}{'  (disabled)' if user.disabled else ''}")
+
+
 @cli.command()
-def serve(host: str = "0.0.0.0", port: int = 8000) -> None:
+def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
+    """Loopback by default; pass --host explicitly (e.g. the Tailscale IP) to listen elsewhere."""
     import uvicorn
 
     uvicorn.run("banana.web.api:app", host=host, port=port)

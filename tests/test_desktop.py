@@ -122,6 +122,29 @@ def test_scanner_host_kept_when_it_still_answers_and_when_nothing_is_found(tmp_p
     assert mod._ensure_scanner_host(config, find=lambda: None) == "192.168.16.178"  # keep, don't blank it
 
 
+def test_new_configs_open_first_account_setup(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    import tomllib
+
+    config = mod._ensure_config(tmp_path / "app")
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["auth"]["setup_page"] is True
+
+
+def test_older_configs_without_auth_get_setup_added_but_operator_auth_is_left_alone(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    import tomllib
+
+    old = tmp_path / "old.toml"
+    old.write_text('[paths]\ninbox = "x"\n[scanner]\nhost = ""\n', encoding="utf-8")
+    mod._ensure_auth_section(old)
+    assert tomllib.loads(old.read_text(encoding="utf-8"))["auth"]["setup_page"] is True
+
+    mine = tmp_path / "mine.toml"
+    mine.write_text('[auth]\nsetup_page = false\n', encoding="utf-8")
+    mod._ensure_auth_section(mine)
+    assert mine.read_text(encoding="utf-8") == '[auth]\nsetup_page = false\n'
+
+
 def test_set_scanner_host_adds_a_scanner_section_when_missing():
     text = '[paths]\ninbox = "x"\n'
     assert desktop._set_scanner_host(text, "1.2.3.4").endswith('[scanner]\nhost = "1.2.3.4"\n')

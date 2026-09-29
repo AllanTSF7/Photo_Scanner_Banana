@@ -58,7 +58,7 @@ jobs:
           set -euo pipefail
           source /home/allan/apps/Photo_Scanner/config/service.env
           for i in $(seq 1 30); do
-            code=$(curl -s -o /dev/null -w "%{http_code}" -u "deploy:${BANANA_DEMO_PASSWORD}" "http://${HOST}:${PORT}/health" || true)
+            code=$(curl -s -o /dev/null -w "%{http_code}" "http://${HOST}:${PORT}/health" || true)
             if [ "$code" = "200" ]; then echo "healthy"; exit 0; fi
             sleep 2
           done

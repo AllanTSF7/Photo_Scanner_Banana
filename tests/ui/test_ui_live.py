@@ -89,6 +89,10 @@ def server(tmp_path, read_text):
         + f"[analysis]\nread_text = {'true' if read_text else 'false'}\n",
         encoding="utf-8",
     )
+    from banana import auth, db
+
+    with db.session(db.make_engine(tmp_path / "data" / "banana.db")) as session:
+        auth.create_user(session, UI_USER, UI_PASSWORD)
     port = _free_port()
     env = {**os.environ, "BANANA_CONFIG": str(config), "PYTHONPATH": str(ROOT)}
     proc = subprocess.Popen(
@@ -110,6 +114,17 @@ def server(tmp_path, read_text):
     fake_port.close()
 
 
+UI_USER, UI_PASSWORD = "operator", "ui-tests-password"
+
+
+def signed_in(browser, base, **kwargs):
+    """A browser context already signed in (the session cookie is shared by its pages)."""
+    context = browser.new_context(**kwargs)
+    response = context.request.post(base + "/api/auth/login", data={"username": UI_USER, "password": UI_PASSWORD})
+    assert response.ok, response.text()
+    return context
+
+
 @pytest.fixture(scope="module")
 def browser():
     try:
@@ -123,7 +138,7 @@ def browser():
 
 @pytest.fixture
 def page(browser, server):
-    context = browser.new_context(viewport={"width": 1440, "height": 900})
+    context = signed_in(browser, server["base"], viewport={"width": 1440, "height": 900})
     pg = context.new_page()
     errors: list[str] = []
     pg.on("pageerror", lambda e: errors.append(str(e)))
@@ -173,7 +188,7 @@ def test_header_controls_and_empty_state(page):
 
 @pytest.mark.parametrize("width,height", [(1440, 900), (1024, 768), (400, 800)])
 def test_responsive_no_horizontal_scroll(browser, server, width, height):
-    context = browser.new_context(viewport={"width": width, "height": height})
+    context = signed_in(browser, server["base"], viewport={"width": width, "height": height})
     pg = context.new_page()
     pg.goto(server["base"] + "/")
     ingest(pg)
@@ -508,7 +523,7 @@ def test_health_reports_scanner_offline(browser, server, tmp_path):
                 break
             except OSError:
                 time.sleep(0.1)
-        context = browser.new_context()
+        context = signed_in(browser, f"http://127.0.0.1:{port}")
         pg = context.new_page()
         pg.goto(f"http://127.0.0.1:{port}/")
         expect(pg.locator("#scanner-status")).to_have_text("Scanner offline")
@@ -744,7 +759,7 @@ def test_learning_loop_fix_line_approve_and_reuse(page):
 
 
 def test_learning_panel_and_health_panel_are_exclusive_and_responsive(browser, server):
-    context = browser.new_context(viewport={"width": 400, "height": 860})
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 860})
     pg = context.new_page()
     pg.goto(server["base"] + "/")
     pg.click("#btn-learning")
@@ -931,7 +946,7 @@ def test_guide_tour_reopens_with_g_shortcut_and_closes_on_escape(page):
 
 
 def test_guide_tour_at_400px(browser, server):
-    context = browser.new_context(viewport={"width": 400, "height": 800})
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
     pg = context.new_page()
     pg.goto(server["base"] + "/")
     ingest(pg)
@@ -1047,7 +1062,7 @@ def test_auto_rotate_chip_shows_and_manual_rotate_still_overrides(page, server):
 def test_auto_rotate_chip_at_400px(browser, server):
     pytest.importorskip("rapidocr_onnxruntime")
     _write_sideways_scan(server["root"])
-    context = browser.new_context(viewport={"width": 400, "height": 800})
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
     pg = context.new_page()
     pg.goto(server["base"] + "/")
     pg.click("#btn-ingest")
@@ -1093,7 +1108,7 @@ def test_delete_only_shows_for_rejected_and_removes_the_scan(page):
 
 
 def test_delete_button_at_400px(browser, server):
-    context = browser.new_context(viewport={"width": 400, "height": 800})
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
     pg = context.new_page()
     pg.goto(server["base"] + "/")
     ingest(pg)
@@ -1142,7 +1157,7 @@ def test_immich_panel_settings_save_and_mask_round_trip(page):
 
 
 def test_immich_panel_at_400px(browser, server):
-    context = browser.new_context(viewport={"width": 400, "height": 800})
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
     pg = context.new_page()
     pg.goto(server["base"] + "/")
     pg.click("#btn-immich")
@@ -1215,7 +1230,7 @@ def test_immich_chip_shows_distance_and_link_to_the_match(page, server):
 
 
 def test_immich_match_link_at_400px(browser, server):
-    context = browser.new_context(viewport={"width": 400, "height": 800})
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
     pg = context.new_page()
     _seed_immich_match(pg, server)
     pg.goto(server["base"] + "/")
@@ -1248,7 +1263,7 @@ def test_immich_progress_bar_shows_photos_read_out_of_the_total(page):
 
 
 def test_immich_progress_bar_at_400px(browser, server):
-    context = browser.new_context(viewport={"width": 400, "height": 800})
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
     pg = context.new_page()
     _fake_running_check(pg)
     pg.goto(server["base"] + "/")
@@ -1262,3 +1277,30 @@ def test_immich_progress_bar_at_400px(browser, server):
 def test_immich_check_button_disabled_until_enabled(page):
     page.click("#btn-immich")
     expect(page.locator("#btn-immich-check")).to_be_disabled()
+
+
+def test_sign_in_page_wrong_password_then_sign_in_and_sign_out_at_400px(browser, server):
+    context = browser.new_context(viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    expect(pg).to_have_url(server["base"] + "/login")  # not signed in: sent to the sign-in page
+    assert no_horizontal_scroll(pg)
+
+    pg.fill("#login-username", UI_USER)
+    pg.fill("#login-password", "not the password")
+    pg.click("#btn-login")
+    expect(pg.locator("#login-error")).to_be_visible()
+    expect(pg.locator("#login-error")).to_contain_text("Wrong username or password")
+
+    pg.fill("#login-password", UI_PASSWORD)
+    pg.click("#btn-login")
+    expect(pg).to_have_url(server["base"] + "/")
+    expect(pg.locator("#user-chip")).to_have_text(UI_USER)
+
+    pg.locator("#btn-logout").scroll_into_view_if_needed()
+    expect(pg.locator("#btn-logout")).to_be_visible()
+    pg.click("#btn-logout")
+    expect(pg).to_have_url(server["base"] + "/login")
+    pg.goto(server["base"] + "/")
+    expect(pg).to_have_url(server["base"] + "/login")  # the session really ended
+    context.close()
