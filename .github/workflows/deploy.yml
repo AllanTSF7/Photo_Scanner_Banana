@@ -1,0 +1,81 @@
+name: Deploy to ubuntu-desktop
+
+# Runs on the self-hosted runner registered to this repo (~/apps/Photo_Scanner/runner on
+# ubuntu-desktop). Builds and tests a brand new release directory first; the live service is only
+# touched - and only after a passing health check - once that's proven good. On failure it's rolled
+# back automatically to whatever release was running before.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+concurrency:
+  group: deploy-photo-scanner
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: [self-hosted, photo-scanner]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: "Build a new release (no sudo: pip-installed build tools, OpenCV skipped)"
+        id: build
+        run: |
+          set -euo pipefail
+          APP=/home/allan/apps/Photo_Scanner
+          REL="$APP/releases/$(date -u +%Y%m%dT%H%M%SZ)_${GITHUB_SHA::7}"
+          mkdir -p "$REL"
+          rsync -a --exclude='.git' "$GITHUB_WORKSPACE"/ "$REL"/
+          cd "$REL"
+          python3 -m venv .venv
+          .venv/bin/pip install -q --upgrade pip
+          .venv/bin/pip install -q "scikit-build-core>=0.10" "nanobind>=2.1" cmake ninja
+          CMAKE_ARGS="-DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON" .venv/bin/pip install -q --no-build-isolation ./native
+          .venv/bin/pip install -q -e ".[dev,ocr,ner]"
+          .venv/bin/python -c "import banana_core; print('native ok, HAVE_OPENCV =', banana_core.HAVE_OPENCV)"
+          echo "release=$REL" >> "$GITHUB_OUTPUT"
+
+      - name: Test the new release before it ever goes live
+        run: |
+          set -euo pipefail
+          cd "${{ steps.build.outputs.release }}"
+          PYTHONPATH=. .venv/bin/python -m pytest -q -rs tests --ignore=tests/ui
+
+      - name: Switch to the new release and restart
+        id: switch
+        run: |
+          set -euo pipefail
+          APP=/home/allan/apps/Photo_Scanner
+          PREV=$(readlink -f "$APP/current" || true)
+          echo "previous=$PREV" >> "$GITHUB_OUTPUT"
+          ln -sfn "${{ steps.build.outputs.release }}" "$APP/current"
+          systemctl --user restart photo-scanner.service
+
+      - name: Wait for it to come back healthy
+        run: |
+          set -euo pipefail
+          source /home/allan/apps/Photo_Scanner/config/service.env
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w "%{http_code}" -u "deploy:${BANANA_DEMO_PASSWORD}" "http://${HOST}:${PORT}/health" || true)
+            if [ "$code" = "200" ]; then echo "healthy"; exit 0; fi
+            sleep 2
+          done
+          echo "did not come back healthy after the restart" >&2
+          exit 1
+
+      - name: Roll back on failure
+        if: failure() && steps.switch.outputs.previous != ''
+        run: |
+          set -euo pipefail
+          APP=/home/allan/apps/Photo_Scanner
+          ln -sfn "${{ steps.switch.outputs.previous }}" "$APP/current"
+          systemctl --user restart photo-scanner.service
+          echo "Rolled back to ${{ steps.switch.outputs.previous }}"
+
+      - name: Prune old releases (keep the 5 most recent)
+        if: success()
+        run: |
+          cd /home/allan/apps/Photo_Scanner/releases
+          ls -1dt */ | tail -n +6 | xargs -r rm -rf --
