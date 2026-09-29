@@ -1,0 +1,77 @@
+name: Build Windows desktop package
+
+# Builds the packaged one-folder Windows bundle on a GitHub-hosted windows-latest runner (it needs
+# MSVC, which the Linux self-hosted runner doesn't have), then hands the finished zip to the
+# self-hosted runner just to drop it where the app itself serves it from (/api/downloads/windows,
+# behind the same password as everything else). No SSH key or new secret needed for that hand-off -
+# it's an artifact passed between two jobs of the same run.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "banana/**"
+      - "native/**"
+      - "vendor/exiftool_win64/**"
+      - "scripts/photoscanner.spec"
+      - "scripts/desktop_launcher.py"
+      - "pyproject.toml"
+      - ".github/workflows/desktop-build.yml"
+  workflow_dispatch: {}
+
+concurrency:
+  group: build-windows-desktop
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install build tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install "scikit-build-core>=0.10" "nanobind>=2.1" cmake ninja pyinstaller
+
+      - name: Build the native module (no OpenCV - nothing in the pipeline calls the OpenCV-only path)
+        env:
+          CMAKE_ARGS: -DCMAKE_DISABLE_FIND_PACKAGE_OpenCV=ON
+        run: pip install --no-build-isolation ./native
+
+      - name: Install the app (OCR + NER extras ship their own offline model files)
+        run: pip install -e ".[ocr,ner]"
+
+      - name: Verify the native module actually loaded before packaging it
+        run: python -c "import banana_core; assert not banana_core.HAVE_OPENCV; print('native ok')"
+
+      - name: Build the PyInstaller bundle
+        run: pyinstaller scripts/photoscanner.spec --noconfirm --distpath dist --workpath build
+
+      - name: Zip it
+        run: Compress-Archive -Path dist/PhotoScanner -DestinationPath PhotoScanner_win64.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PhotoScanner_win64
+          path: PhotoScanner_win64.zip
+          retention-days: 14
+
+  publish:
+    needs: build
+    runs-on: [self-hosted, photo-scanner]
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: PhotoScanner_win64
+
+      - name: Publish where the app serves it from
+        run: |
+          set -euo pipefail
+          mkdir -p ~/data/photo_scanner/downloads
+          mv -f PhotoScanner_win64.zip ~/data/photo_scanner/downloads/PhotoScanner_win64.zip
+          echo "published $(date -u +%Y-%m-%dT%H:%M:%SZ), commit ${GITHUB_SHA::7}" > ~/data/photo_scanner/downloads/BUILD_INFO.txt

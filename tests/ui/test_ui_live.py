@@ -163,6 +163,7 @@ def test_header_controls_and_empty_state(page):
     expect(page.locator("#btn-ingest")).to_be_enabled()
     expect(page.locator("#btn-export")).to_be_enabled()
     expect(page.locator("a", has_text="API docs")).to_have_attribute("href", "/docs")
+    expect(page.locator("#link-download-windows")).to_have_attribute("href", "/api/downloads/windows")
     expect(page.locator("#scanner-status")).to_have_text("Scanner online")
     expect(page.locator("#btn-scan")).to_be_enabled()
     assert page.locator("select").count() == 0 or all(

@@ -37,9 +37,13 @@ host = ""
 
 
 def _app_dir() -> Path:
-    """The program's own folder: the PyInstaller bundle dir in a packaged build, else the repo root."""
+    """Where bundled data (exiftool, static assets) actually lives: PyInstaller's `_MEIPASS` in a
+    packaged build - the `_internal/` folder for a one-folder build, a temp extraction dir for
+    one-file - else the repo root. NOT simply the exe's own folder: PyInstaller 6+ nests one-folder
+    data under `_internal/` rather than beside the exe, and this must match wherever the spec's
+    `datas` entries actually land."""
     if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
+        return Path(getattr(sys, "_MEIPASS", Path(sys.executable).resolve().parent))
     return Path(__file__).resolve().parent.parent
 
 

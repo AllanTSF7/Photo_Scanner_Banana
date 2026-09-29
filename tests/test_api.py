@@ -350,6 +350,20 @@ def test_dev_reload_token_disabled_without_env(client, monkeypatch):
     assert data["enabled"] is True and data["token"]
 
 
+def test_windows_download_is_404_until_a_build_is_published_then_serves_it(client):
+    c, root = client
+    assert c.get("/api/downloads/windows").status_code == 404
+
+    downloads = root / "data" / "downloads"
+    downloads.mkdir(parents=True)
+    (downloads / "PhotoScanner_win64.zip").write_bytes(b"PK\x03\x04fake-zip-bytes")
+
+    response = c.get("/api/downloads/windows")
+    assert response.status_code == 200
+    assert response.content == b"PK\x03\x04fake-zip-bytes"
+    assert response.headers["content-type"] == "application/zip"
+
+
 def test_component_health(client):
     c, _ = client
     data = c.get("/api/health").json()

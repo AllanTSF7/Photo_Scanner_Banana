@@ -7,6 +7,7 @@ dist/
 *.egg-info/
 native/build/
 .tools/
+# vendor/exiftool_win64/ IS tracked (used by CI and the packaged desktop build - see scripts/photoscanner.spec)
 config.toml
 data/
 *.db

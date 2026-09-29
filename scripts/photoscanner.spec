@@ -7,7 +7,10 @@ from PyInstaller.utils.hooks import collect_all
 block_cipher = None
 ROOT = Path.cwd()
 
-datas = [(str(ROOT / "banana" / "web" / "static"), "banana/web/static")]
+datas = [
+    (str(ROOT / "banana" / "web" / "static"), "banana/web/static"),
+    (str(ROOT / "vendor" / "exiftool_win64"), "tools/exiftool"),
+]
 binaries = []
 hiddenimports = ["banana.web.api", "banana_core"]
 

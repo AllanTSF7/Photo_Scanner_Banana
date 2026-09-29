@@ -185,6 +185,17 @@ def start_scan(body: ScanRequest | None = None) -> dict:
         raise HTTPException(409, str(exc)) from exc
 
 
+@app.get("/api/downloads/windows", tags=["system"])
+def download_windows_build() -> FileResponse:
+    """The packaged desktop build for a new scanning station (.github/workflows/desktop-build.yml
+    publishes it here after every build that passes). Inherits the same password gate as everything
+    else in this app - there is no separate, unprotected download page."""
+    path = settings.paths.data_dir / "downloads" / "PhotoScanner_win64.zip"
+    if not path.exists():
+        raise HTTPException(404, "no build has been published yet")
+    return FileResponse(path, filename="PhotoScanner_win64.zip", media_type="application/zip")
+
+
 @app.get("/api/health", tags=["system"])
 def component_health() -> dict:
     """Health of each component: API, database, ExifTool, C++ core, folders, SANE, scanner, Immich."""

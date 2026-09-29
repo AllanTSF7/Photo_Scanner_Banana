@@ -60,6 +60,20 @@ def test_ensure_config_points_at_the_bundled_exiftool_when_present(tmp_path, mon
     assert exiftool.as_posix() in text
 
 
+def test_app_dir_resolves_to_meipass_when_frozen_not_the_exe_folder(tmp_path, monkeypatch):
+    # PyInstaller 6+ one-folder builds put bundled data (exiftool, static assets) under _internal/,
+    # not beside the exe - a real bug caught here: _app_dir() used to return the exe's own folder,
+    # which pointed at the wrong place and made the packaged build unable to find exiftool at all.
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    meipass = tmp_path / "dist" / "PhotoScanner" / "_internal"
+    exe_dir = tmp_path / "dist" / "PhotoScanner"
+    monkeypatch.setattr(mod.sys, "frozen", True, raising=False)
+    monkeypatch.setattr(mod.sys, "_MEIPASS", str(meipass), raising=False)
+    monkeypatch.setattr(mod.sys, "executable", str(exe_dir / "PhotoScanner.exe"), raising=False)
+
+    assert mod._app_dir() == meipass
+
+
 def test_ensure_config_falls_back_to_path_exiftool_when_not_bundled(tmp_path, monkeypatch):
     mod = _reload_with_env(monkeypatch, tmp_path)
     text = mod._ensure_config(tmp_path / "app").read_text(encoding="utf-8")
