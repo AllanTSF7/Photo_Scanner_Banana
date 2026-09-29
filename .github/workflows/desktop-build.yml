@@ -44,13 +44,38 @@ jobs:
         run: pip install --no-build-isolation ./native
 
       - name: Install the app (OCR + NER extras ship their own offline model files)
-        run: pip install -e ".[ocr,ner]"
+        run: pip install -e ".[dev,ocr,ner]"
 
       - name: Verify the native module actually loaded before packaging it
         run: python -c "import banana_core; assert not banana_core.HAVE_OPENCV; print('native ok')"
 
+      - name: Run the real test suite first - fail fast, before spending time packaging
+        run: python -m pytest -q -rs tests --ignore=tests/ui
+
       - name: Build the PyInstaller bundle
         run: pyinstaller scripts/photoscanner.spec --noconfirm --distpath dist --workpath build
+
+      - name: "Smoke-test the actual exe: a real double-click launch, nothing redirected"
+        # This is the case pytest can never cover, since it never runs the frozen exe at all - it's
+        # exactly how the sys.stdout=None crash (windowed PyInstaller builds) got shipped once already:
+        # the code passed every test, but the *packaged* exe still failed on a plain launch.
+        shell: pwsh
+        run: |
+          $proc = Start-Process -FilePath "dist\PhotoScanner\PhotoScanner.exe" -WorkingDirectory "$env:RUNNER_TEMP" -PassThru
+          try {
+            $ok = $false
+            for ($i = 0; $i -lt 30; $i++) {
+              if ($proc.HasExited) { throw "PhotoScanner.exe exited early (code $($proc.ExitCode))" }
+              Start-Sleep -Seconds 1
+              try {
+                $r = Invoke-WebRequest -Uri "http://127.0.0.1:8420/health" -UseBasicParsing -TimeoutSec 2
+                if ($r.StatusCode -eq 200) { Write-Host "Smoke test passed: $($r.Content)"; $ok = $true; break }
+              } catch { }
+            }
+            if (-not $ok) { throw "PhotoScanner.exe never answered /health within 30s" }
+          } finally {
+            Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+          }
 
       - name: Zip it
         run: Compress-Archive -Path dist/PhotoScanner -DestinationPath PhotoScanner_win64.zip
