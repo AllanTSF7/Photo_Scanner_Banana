@@ -60,6 +60,34 @@ def test_ensure_config_points_at_the_bundled_exiftool_when_present(tmp_path, mon
     assert exiftool.as_posix() in text
 
 
+def test_redirect_streams_replaces_none_stdout_stderr_stdin(tmp_path, monkeypatch):
+    # A PyInstaller windowed build (console=False - what this bundle uses) hands the process actually-None
+    # stdout/stderr/stdin, not just closed streams. Real bug: uvicorn's logging setup calls
+    # sys.stdout.isatty() at startup and crashed with "Unable to configure formatter 'default'" before the
+    # server ever came up - caught only by launching the real exe with no redirection, the way an operator
+    # actually double-clicks it (this session's earlier smoke test used Start-Process redirection, which
+    # gives the child process real streams and silently hid the exact bug a real launch hits).
+    monkeypatch.setattr(desktop.sys, "stdout", None, raising=False)
+    monkeypatch.setattr(desktop.sys, "stderr", None, raising=False)
+    monkeypatch.setattr(desktop.sys, "stdin", None, raising=False)
+
+    log_dir = tmp_path / "logs"
+    desktop._redirect_streams_if_windowed(log_dir)
+
+    assert desktop.sys.stdout is not None and hasattr(desktop.sys.stdout, "isatty")
+    assert desktop.sys.stdout.isatty() is False
+    assert desktop.sys.stderr is not None
+    assert desktop.sys.stdin is not None
+    assert (log_dir / "photoscanner.log").exists()
+
+
+def test_redirect_streams_leaves_real_streams_alone(tmp_path, monkeypatch):
+    real_stdout = desktop.sys.stdout
+    desktop._redirect_streams_if_windowed(tmp_path / "logs")
+    assert desktop.sys.stdout is real_stdout
+    assert not (tmp_path / "logs").exists()  # never even created when nothing needed redirecting
+
+
 def test_app_dir_resolves_to_meipass_when_frozen_not_the_exe_folder(tmp_path, monkeypatch):
     # PyInstaller 6+ one-folder builds put bundled data (exiftool, static assets) under _internal/,
     # not beside the exe - a real bug caught here: _app_dir() used to return the exe's own folder,

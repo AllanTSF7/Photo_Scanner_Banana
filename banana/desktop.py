@@ -79,6 +79,22 @@ def _ensure_config(app_dir: Path) -> Path:
     return config_path
 
 
+def _redirect_streams_if_windowed(log_dir: Path) -> None:
+    """A PyInstaller windowed build (console=False, what this bundle uses so nothing flashes a
+    terminal on launch) sets sys.stdout/stderr/stdin to actually None, not just closed. Nothing that
+    assumes a real stream survives that - uvicorn's own logging setup calls sys.stdout.isatty() and
+    crashes with "Unable to configure formatter 'default'" before the server ever starts. Redirecting
+    to a log file both fixes that and gives us something to look at from a machine we can't see."""
+    if sys.stdout is not None and sys.stderr is not None:
+        return
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = open(log_dir / "photoscanner.log", "a", buffering=1, encoding="utf-8")
+    sys.stdout = sys.stdout or log_file
+    sys.stderr = sys.stderr or log_file
+    if sys.stdin is None:
+        sys.stdin = open(os.devnull, "r", encoding="utf-8")
+
+
 def _port_open(host: str, port: int) -> bool:
     with socket.socket() as s:
         s.settimeout(0.3)
@@ -95,6 +111,7 @@ def _open_browser_when_ready(url: str, host: str, port: int) -> None:
 
 def main() -> None:
     app_dir = _app_dir()
+    _redirect_streams_if_windowed(_data_home() / "logs")
     host, port = "127.0.0.1", DEFAULT_PORT
     url = f"http://{host}:{port}/"
 
