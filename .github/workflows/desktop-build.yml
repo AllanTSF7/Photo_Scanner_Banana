@@ -70,8 +70,11 @@ jobs:
           name: PhotoScanner_win64
 
       - name: Publish where the app serves it from
+        # Must match settings.paths.data_dir/downloads in banana/web/api.py's download route -
+        # data_dir (not a sibling folder) is the one path the app's own config actually names.
         run: |
           set -euo pipefail
-          mkdir -p ~/data/photo_scanner/downloads
-          mv -f PhotoScanner_win64.zip ~/data/photo_scanner/downloads/PhotoScanner_win64.zip
-          echo "published $(date -u +%Y-%m-%dT%H:%M:%SZ), commit ${GITHUB_SHA::7}" > ~/data/photo_scanner/downloads/BUILD_INFO.txt
+          DEST=~/data/photo_scanner/data/downloads
+          mkdir -p "$DEST"
+          mv -f PhotoScanner_win64.zip "$DEST/PhotoScanner_win64.zip"
+          echo "published $(date -u +%Y-%m-%dT%H:%M:%SZ), commit ${GITHUB_SHA::7}" > "$DEST/BUILD_INFO.txt"
