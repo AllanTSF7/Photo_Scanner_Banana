@@ -12,11 +12,11 @@ datas = [
     (str(ROOT / "vendor" / "exiftool_win64"), "tools/exiftool"),
 ]
 binaries = []
-hiddenimports = ["banana.web.api", "banana_core"]
+hiddenimports = ["banana.web.api", "banana_core", "banana.scanner.twain_scan", "banana.scanner.discover"]
 
 # These three ship their own data (ONNX models, spaCy pipeline data, native extension DLLs) that plain
 # import-analysis would miss.
-for pkg in ("rapidocr_onnxruntime", "en_core_web_sm", "onnxruntime"):
+for pkg in ("rapidocr_onnxruntime", "en_core_web_sm", "onnxruntime", "twain", "zeroconf"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b

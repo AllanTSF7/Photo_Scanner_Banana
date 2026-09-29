@@ -143,14 +143,28 @@ class ScanController:
         try:
             self.inbox.mkdir(parents=True, exist_ok=True)
             staging.mkdir(parents=True)
-            proc = subprocess.run(
-                scanimage_args(self.cfg, staging, run.count),
-                capture_output=True, text=True, timeout=self.cfg.timeout_seconds,
-            )
-            pages = staged_pages(staging)
-            output = (proc.stderr or proc.stdout or "").strip()
-            if not pages:
-                raise RuntimeError(_explain(output) or f"scanimage exited with code {proc.returncode}")
+            if self.cfg.effective_backend == "twain":
+                from banana.scanner.twain_scan import acquire_pages
+
+                acquire_pages(self.cfg, staging, run.count)
+                pages = staged_pages(staging)
+                if not pages:
+                    raise RuntimeError("The scanner returned no pages.")
+            else:
+                try:
+                    proc = subprocess.run(
+                        scanimage_args(self.cfg, staging, run.count),
+                        capture_output=True, text=True, timeout=self.cfg.timeout_seconds,
+                    )
+                except FileNotFoundError as exc:
+                    raise RuntimeError(
+                        f"SANE's scanimage wasn't found ({self.cfg.scanimage}). On Windows, set "
+                        "scanner.backend to \"twain\" (or \"auto\") to use Epson's driver instead."
+                    ) from exc
+                pages = staged_pages(staging)
+                output = (proc.stderr or proc.stdout or "").strip()
+                if not pages:
+                    raise RuntimeError(_explain(output) or f"scanimage exited with code {proc.returncode}")
             with self._lock:
                 run.pages, run.phase = len(pages), "ingesting"
             files = place_pages(pages, self.inbox, run.run_name, self.cfg.duplex, self.cfg.first_side)

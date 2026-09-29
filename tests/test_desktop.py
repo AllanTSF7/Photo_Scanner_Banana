@@ -88,6 +88,45 @@ def test_redirect_streams_leaves_real_streams_alone(tmp_path, monkeypatch):
     assert not (tmp_path / "logs").exists()  # never even created when nothing needed redirecting
 
 
+def test_scanner_host_is_filled_in_from_discovery_and_nothing_else_changes(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    config = mod._ensure_config(tmp_path / "app")
+    before = config.read_text(encoding="utf-8")
+
+    host = mod._ensure_scanner_host(config, find=lambda: {"host": "192.168.16.178"})
+    assert host == "192.168.16.178"
+    after = config.read_text(encoding="utf-8")
+    assert 'host = "192.168.16.178"' in after
+    assert after.replace('host = "192.168.16.178"', 'host = ""') == before  # only that one line changed
+
+
+def test_scanner_host_is_refreshed_when_dhcp_moved_the_scanner(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    config = mod._ensure_config(tmp_path / "app")
+    config.write_text(mod._set_scanner_host(config.read_text(encoding="utf-8"), "10.255.255.1"), encoding="utf-8")
+    monkeypatch.setattr(mod, "_port_open", lambda host, port: False)  # old address no longer answers
+
+    assert mod._ensure_scanner_host(config, find=lambda: {"host": "192.168.16.200"}) == "192.168.16.200"
+    assert 'host = "192.168.16.200"' in config.read_text(encoding="utf-8")
+
+
+def test_scanner_host_kept_when_it_still_answers_and_when_nothing_is_found(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    config = mod._ensure_config(tmp_path / "app")
+    config.write_text(mod._set_scanner_host(config.read_text(encoding="utf-8"), "192.168.16.178"), encoding="utf-8")
+
+    monkeypatch.setattr(mod, "_port_open", lambda host, port: True)
+    assert mod._ensure_scanner_host(config, find=lambda: pytest.fail("no lookup when it answers")) == "192.168.16.178"
+
+    monkeypatch.setattr(mod, "_port_open", lambda host, port: False)
+    assert mod._ensure_scanner_host(config, find=lambda: None) == "192.168.16.178"  # keep, don't blank it
+
+
+def test_set_scanner_host_adds_a_scanner_section_when_missing():
+    text = '[paths]\ninbox = "x"\n'
+    assert desktop._set_scanner_host(text, "1.2.3.4").endswith('[scanner]\nhost = "1.2.3.4"\n')
+
+
 def test_app_dir_resolves_to_meipass_when_frozen_not_the_exe_folder(tmp_path, monkeypatch):
     # PyInstaller 6+ one-folder builds put bundled data (exiftool, static assets) under _internal/,
     # not beside the exe - a real bug caught here: _app_dir() used to return the exe's own folder,

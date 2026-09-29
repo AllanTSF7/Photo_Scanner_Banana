@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tomllib
 from pathlib import Path
 from typing import Literal
@@ -54,10 +55,20 @@ class ScannerConfig(BaseModel):
     after_scan: Literal["review", "inbox"] = "review"  # default destination; the UI can choose per scan
     # Which side of each duplex pair SANE delivers first. The FF-680W (photos loaded face down) reads the back first.
     first_side: Literal["front", "back"] = "back"
+    # How pages are acquired. auto = Epson's TWAIN driver (Epson Scan 2) on Windows, SANE scanimage elsewhere.
+    backend: Literal["auto", "sane", "twain"] = "auto"
+    twain_source: str = ""  # TWAIN source name; empty picks the FF-680W (or the first Epson source)
+    auto_rotate: bool = True  # driver-side orientation; TWAIN only (SANE's epsonds can't)
 
     @property
     def device(self) -> str:
         return self.sane_device or f"epsonds:net:{self.host}"
+
+    @property
+    def effective_backend(self) -> str:
+        if self.backend != "auto":
+            return self.backend
+        return "twain" if sys.platform == "win32" else "sane"
 
     @property
     def duplex(self) -> bool:

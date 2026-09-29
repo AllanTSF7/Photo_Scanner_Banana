@@ -30,8 +30,8 @@ data_dir = "{data_dir}"
 path = "{exiftool}"
 
 [scanner]
-# Left blank: this build expects photos to arrive via the scanner's own software into the inbox folder
-# above, then "Ingest inbox" in the app. Fill in host = "<ip>" only if this PC drives the scanner directly.
+# Filled in automatically: on every launch the app looks the Epson up by name on the network and updates
+# this if the scanner's address changed. Scanning uses Epson's own driver (Epson Scan 2), which must be installed.
 host = ""
 """
 
@@ -95,6 +95,52 @@ def _redirect_streams_if_windowed(log_dir: Path) -> None:
         sys.stdin = open(os.devnull, "r", encoding="utf-8")
 
 
+def _set_scanner_host(config_text: str, host: str) -> str:
+    """Replace only the `host = "..."` line inside [scanner]; everything else the operator wrote is kept."""
+    lines, section, done = config_text.splitlines(keepends=True), None, False
+    for i, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped.startswith("[") and stripped.endswith("]"):
+            if section == "scanner" and not done:
+                lines.insert(i, f'host = "{host}"\n')
+                done = True
+                break
+            section = stripped[1:-1].strip()
+        elif section == "scanner" and stripped.split("=")[0].strip() == "host":
+            lines[i] = f'host = "{host}"\n'
+            done = True
+            break
+    if not done:
+        if section != "scanner":
+            lines.append("\n[scanner]\n")
+        lines.append(f'host = "{host}"\n')
+    return "".join(lines)
+
+
+def _ensure_scanner_host(config_path: Path, find=None) -> str | None:
+    """Keep a configured scanner address that answers; otherwise look the scanner up by name on the
+    network (mDNS) and write the address it's at now. Returns the host in use, or None."""
+    import tomllib
+
+    try:
+        current = tomllib.loads(config_path.read_text(encoding="utf-8")).get("scanner", {}).get("host", "")
+    except (OSError, tomllib.TOMLDecodeError):
+        return None
+    if current and _port_open(current, 1865):
+        return current
+    if find is None:
+        from banana.scanner.discover import find_scanners, pick_epson
+
+        def find():
+            return pick_epson(find_scanners())
+    found = find()
+    if not found:
+        return current or None
+    if found["host"] != current:
+        config_path.write_text(_set_scanner_host(config_path.read_text(encoding="utf-8"), found["host"]), encoding="utf-8")
+    return found["host"]
+
+
 def _port_open(host: str, port: int) -> bool:
     with socket.socket() as s:
         s.settimeout(0.3)
@@ -120,7 +166,12 @@ def main() -> None:
         webbrowser.open(url)
         return
 
-    os.environ.setdefault("BANANA_CONFIG", str(_ensure_config(app_dir)))
+    config_path = _ensure_config(app_dir)
+    try:
+        _ensure_scanner_host(config_path)
+    except Exception:  # noqa: BLE001 - a scanner lookup failure must never stop the app from starting
+        pass
+    os.environ.setdefault("BANANA_CONFIG", str(config_path))
 
     import uvicorn
 

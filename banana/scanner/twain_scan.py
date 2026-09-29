@@ -1,0 +1,97 @@
+"""Scanning through Epson's TWAIN driver (Epson Scan 2) on Windows, where SANE's `scanimage` doesn't exist.
+
+Writes pages into the same staging folder and `page_NNNN.jpg` naming as the SANE path, so pairing,
+placement and ingest in banana.scanner.sane work unchanged. The driver's own UI is never shown.
+pytwain needs a Windows message loop in the thread that opens the source; ScanController runs this
+entirely inside its own worker thread, which satisfies that.
+"""
+
+from __future__ import annotations
+
+import os
+from pathlib import Path
+
+from PIL import Image
+
+from banana.config import ScannerConfig
+
+JPEG_QUALITY = 95
+_PIXEL_TYPES = {"Color": "TWPT_RGB", "Gray": "TWPT_GRAY", "Lineart": "TWPT_BW"}
+
+
+def _current(result):
+    """Current value from a pytwain get_capability result (a one-value or an enumeration container)."""
+    _, value = result
+    if isinstance(value, tuple) and len(value) == 3:
+        current_index, _, values = value
+        return values[current_index]
+    return value
+
+
+def pick_source(sources: list[str], wanted: str = "") -> str:
+    if wanted:
+        if wanted in sources:
+            return wanted
+        raise RuntimeError(f"TWAIN scanner {wanted!r} not found (available: {', '.join(sources) or 'none'})")
+    for match in ("FF-680W", "EPSON"):
+        for name in sources:
+            if match in name.upper():
+                return name
+    if sources:
+        return sources[0]
+    raise RuntimeError("No TWAIN scanner found. Install Epson Scan 2 and add the scanner in Epson Scan 2 Utility.")
+
+
+def _set(twain, src, cap: str, kind: str, value, required: bool = False) -> None:
+    try:
+        src.set_capability(getattr(twain, cap), getattr(twain, kind), value)
+    except Exception as exc:  # noqa: BLE001 - optional capabilities vary by driver; required ones re-raise
+        if required:
+            raise RuntimeError(f"The scanner driver rejected {cap}={value!r}: {exc}") from exc
+
+
+def acquire_pages(cfg: ScannerConfig, staging: Path, count: str = "all", twain=None) -> list[Path]:
+    """Scan the feeder into `staging` as page_0001.jpg, page_0002.jpg, ... in scan order."""
+    if twain is None:
+        import twain  # Windows only; imported here so nothing else depends on it
+    staging.mkdir(parents=True, exist_ok=True)
+    pages: list[Path] = []
+    pending: list[Path] = []
+
+    sm = twain.SourceManager()
+    try:
+        src = sm.open_source(pick_source(list(sm.source_list), cfg.twain_source))
+        try:
+            if not _current(src.get_capability(twain.CAP_FEEDERLOADED)):
+                raise RuntimeError("No photos in the feeder. Load the stack and try again.")
+            sheets = 1 if count == "one" else cfg.max_feeder_count
+            _set(twain, src, "CAP_FEEDERENABLED", "TWTY_BOOL", True)
+            _set(twain, src, "CAP_DUPLEXENABLED", "TWTY_BOOL", cfg.duplex, required=cfg.duplex)
+            _set(twain, src, "CAP_XFERCOUNT", "TWTY_INT16", sheets * (2 if cfg.duplex else 1))
+            _set(twain, src, "ICAP_PIXELTYPE", "TWTY_UINT16", getattr(twain, _PIXEL_TYPES[cfg.mode]), required=True)
+            _set(twain, src, "ICAP_XRESOLUTION", "TWTY_FIX32", float(cfg.resolution), required=True)
+            _set(twain, src, "ICAP_YRESOLUTION", "TWTY_FIX32", float(cfg.resolution))
+            _set(twain, src, "ICAP_AUTOMATICBORDERDETECTION", "TWTY_BOOL", cfg.auto_crop)
+            _set(twain, src, "ICAP_AUTOMATICDESKEW", "TWTY_BOOL", cfg.skew_correction)
+            _set(twain, src, "ICAP_AUTOMATICROTATE", "TWTY_BOOL", cfg.auto_rotate)
+
+            def before(_info: dict) -> str:
+                path = staging / f"page_{len(pages) + len(pending) + 1:04d}.bmp"
+                pending.append(path)
+                return str(path)
+
+            def after(_more: int) -> None:
+                # The driver hands over lossless BMP; keep the pipeline's JPEG convention at high quality.
+                bmp = pending.pop()
+                jpg = bmp.with_suffix(".jpg")
+                with Image.open(bmp) as image:
+                    image.convert("RGB" if cfg.mode == "Color" else "L").save(jpg, "JPEG", quality=JPEG_QUALITY)
+                os.remove(bmp)
+                pages.append(jpg)
+
+            src.acquire_file(before=before, after=after, show_ui=False, modal=False)
+        finally:
+            src.close()
+    finally:
+        sm.close()
+    return pages

@@ -27,7 +27,7 @@ Offline photo-scan review pipeline: Epson FF-680W scans → review web UI → EX
   - Full visual system and component contracts: see **UI DESIGN SYSTEM** below.
 * **Data & Hardware Constraints:**
   - Originals are NEVER modified; ingestion moves them to `archive/<batch>/`.
-  - Scanner goes through **SANE** (`epsonds:net:192.168.16.178`, TCP 1865). NEVER use ScanSmart, TWAIN, or eSCL/AirScan. SANE limitations: $\le$ 600 dpi, auto-crop/skew, no FastFoto auto-rotate.
+  - Scanner goes through **SANE** on Linux (`epsonds:net:<host>`, TCP 1865) or **Epson's TWAIN driver (Epson Scan 2)** on Windows (`scanner.backend = "auto"` picks per platform; `banana/scanner/twain_scan.py`). NEVER use ScanSmart or eSCL/AirScan. The scanner's address is found by name over mDNS (`_scanner._tcp`), not hard-coded. SANE limitations: $\le$ 600 dpi, no working auto-crop, no auto-rotate; the TWAIN driver offers 1200 dpi, auto-crop, deskew and auto-rotate.
   - Recognition is **offline only** (TrOCR primary, local Ollama VLM fallback). Cloud OCR/LLM APIs are strictly forbidden.
   - Do NOT connect to NAS or Immich unless explicitly instructed.
 * **Learning & Model Training:**

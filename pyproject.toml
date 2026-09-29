@@ -17,6 +17,8 @@ dependencies = [
     "numpy>=2.0",
     "pillow>=10.4",
     "httpx>=0.27",
+    "zeroconf>=0.130",  # finds the scanner on the network by name (mDNS)
+    "pytwain>=2.3; sys_platform == 'win32'",  # Epson's TWAIN driver on Windows, where SANE doesn't exist
 ]
 
 [project.optional-dependencies]
