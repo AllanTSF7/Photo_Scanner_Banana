@@ -59,6 +59,8 @@ class ScannerConfig(BaseModel):
     backend: Literal["auto", "sane", "twain"] = "auto"
     twain_source: str = ""  # TWAIN source name; empty picks the FF-680W (or the first Epson source)
     auto_rotate: bool = True  # driver-side orientation; TWAIN only (SANE's epsonds can't)
+    # On launch, finish scan runs that stopped before their pages reached the inbox (inbox/.scanning-*).
+    recover_on_start: bool = True
 
     @property
     def device(self) -> str:

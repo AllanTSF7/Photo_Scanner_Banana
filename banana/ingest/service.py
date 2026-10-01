@@ -38,6 +38,15 @@ def _move(src: Path, dest_dir: Path) -> Path:
     return dest
 
 
+def _unique_batch_name(session: Session, base: str) -> str:
+    """Batch names are unique and timestamped to the second; two ingests in the same second (a recovery right
+    after a scan's own ingest) would otherwise fail on the unique constraint after files were already moved."""
+    name, n = base, 2
+    while session.exec(select(Batch).where(Batch.name == name)).first():
+        name, n = f"{base}-{n}", n + 1
+    return name
+
+
 def ingest_inbox(session: Session, settings: Settings, batch_name: str | None = None) -> IngestReport:
     inbox = settings.paths.inbox
     files = [p for p in inbox.iterdir() if p.is_file()] if inbox.exists() else []
@@ -47,7 +56,7 @@ def ingest_inbox(session: Session, settings: Settings, batch_name: str | None = 
     if not paired.groups:
         return report
 
-    name = batch_name or f"inbox-{datetime.now():%Y%m%d-%H%M%S}"
+    name = _unique_batch_name(session, batch_name or f"inbox-{datetime.now():%Y%m%d-%H%M%S}")
     batch = Batch(name=name)
     session.add(batch)
     session.flush()

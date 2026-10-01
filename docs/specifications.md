@@ -182,6 +182,16 @@ that actually changed.
   - `inbox`: files stay in the inbox until **Ingest inbox** / `POST /api/ingest`.
 - **Errors:** no pages means the run failed. "Document feeder out of documents" becomes "No photos in the feeder…".
   The staging folder is removed unless pages were left in it.
+- **Interrupted runs [implemented]** (B-27): if the TWAIN driver raises after handing over pages, the leftover
+  `page_NNNN.bmp` is converted and every page is still placed and ingested; the run ends `done` with a `warning`
+  saying what stopped the driver. Every run's start, outcome and any driver error are logged.
+- **Stranded runs [implemented]:** `GET /api/scanner` lists `.scanning-*` folders that still hold files (`stranded`).
+  `POST /api/scanner/recover` converts leftover BMPs, places the pages under the run's own name and ingests them;
+  a page that can't be decoded is never deleted and is reported as `kept`. The same recovery runs on launch
+  (`scanner.recover_on_start`, default true).
+- **Visible until dismissed [implemented]:** a failed run, a run that finished with a warning, or stranded runs show
+  a bar under the header (`#scan-alert`, `role="alert"`) with **Recover scans** and **Dismiss**. Dismissing hides
+  that exact state; anything new about it shows the bar again.
 
 ### Observed FF-680W behavior through SANE (10-photo test, 2026-09-14)
 - `--adf-crp=yes` is **ignored**: every page is the full 5096 × 9283 px (8.5 × 15.5 in @600 dpi). The photo sits at the top

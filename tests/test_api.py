@@ -78,7 +78,7 @@ def test_scanner_status(client, monkeypatch):
     import banana.web.api as api
 
     c, _ = client
-    assert c.get("/api/scanner").json() == {"configured": False}
+    assert c.get("/api/scanner").json() == {"configured": False, "stranded": []}
 
     with socket.socket() as listener:  # stand-in scanner on a free local port
         listener.bind(("127.0.0.1", 0))
@@ -560,3 +560,23 @@ def test_export_approved(client):
     assert by_id[scans["Attic3_0003"]["id"]]["back"] is None  # blank back not exported
     assert (root / "sorted" / f"{first['front']}.xmp").exists()
     assert c.get(f"/api/scans/{scans['Attic3_0001']['id']}").json()["export"]["front_rel"] == first["front"]
+
+
+def test_stranded_scan_runs_are_reported_and_recovered_into_review(client):
+    from PIL import Image
+
+    c, root = client
+    c.post("/api/ingest")  # clear the demo inbox first
+    folder = root / "inbox" / ".scanning-scan20260930132056"
+    folder.mkdir()
+    for n in (1, 2, 3):
+        Image.new("RGB", (400, 300), (40 * n, 90, 60)).save(folder / f"page_{n:04d}.jpg", "JPEG")
+    Image.new("RGB", (400, 300), (200, 90, 60)).save(folder / "page_0004.bmp", "BMP")
+
+    assert c.get("/api/scanner").json()["stranded"] == [{"run": "scan20260930132056", "files": 4}]
+
+    r = c.post("/api/scanner/recover").json()
+    assert r["recovered"] == [{"run": "scan20260930132056", "files": 4}]
+    assert len(r["ingest"]["created"]) == 2  # two photos, front + back each
+    assert not folder.exists()
+    assert c.get("/api/scanner").json()["stranded"] == []

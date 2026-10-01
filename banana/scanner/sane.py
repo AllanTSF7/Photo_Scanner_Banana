@@ -7,6 +7,7 @@ even pages -> <run>_NNNN_b.jpg (back) when scanning duplex.
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import shutil
@@ -19,6 +20,9 @@ from pathlib import Path
 
 from banana.config import ScannerConfig
 
+log = logging.getLogger(__name__)
+
+STAGING_PREFIX = ".scanning-"
 PAGE_PATTERN = "page_%04d.jpg"
 _PAGE_RE = re.compile(r"^page_(\d{4})\.jpg$")
 
@@ -94,6 +98,7 @@ class ScanRun:
     pages: int = 0
     files: list[str] = field(default_factory=list)
     message: str = ""
+    warning: str = ""  # set when the run finished but something needs the operator's attention
     ingest: dict | None = None
 
 
@@ -128,7 +133,7 @@ class ScanController:
             if not self.cfg.host and not self.cfg.sane_device:
                 raise RuntimeError("no scanner configured (scanner.host)")
             name = f"scan{datetime.now():%Y%m%d%H%M%S}"
-            self._staging = self.inbox / f".scanning-{name}"
+            self._staging = self.inbox / f"{STAGING_PREFIX}{name}"
             self._run = ScanRun(
                 state="scanning", phase="feeding", destination=destination, count=count, run_name=name,
                 started_at=datetime.now().isoformat(timespec="seconds"),
@@ -140,13 +145,20 @@ class ScanController:
     def _work(self, on_complete) -> None:
         staging = self._staging
         run = self._run
+        log.info("scan %s started (%s, destination %s)", run.run_name, run.count, run.destination)
         try:
             self.inbox.mkdir(parents=True, exist_ok=True)
             staging.mkdir(parents=True)
             if self.cfg.effective_backend == "twain":
-                from banana.scanner.twain_scan import acquire_pages
+                from banana.scanner.twain_scan import ScanInterrupted, acquire_pages
 
-                acquire_pages(self.cfg, staging, run.count)
+                try:
+                    acquire_pages(self.cfg, staging, run.count)
+                except ScanInterrupted as exc:
+                    # The pages that arrived are fine: place and ingest them, and say what stopped the driver.
+                    log.warning("scan %s: %s", run.run_name, exc, exc_info=exc.cause)
+                    with self._lock:
+                        run.warning = f"The scanner stopped with an error ({exc.cause}). All {len(exc.pages)} page(s) it sent were kept."
                 pages = staged_pages(staging)
                 if not pages:
                     raise RuntimeError("The scanner returned no pages.")
@@ -184,15 +196,61 @@ class ScanController:
                     run.ingest = result
             with self._lock:
                 run.state, run.phase = "done", None
+            log.info("scan %s done: %s", run.run_name, message)
         except Exception as exc:  # noqa: BLE001 - surfaced to the UI
+            log.exception("scan %s failed", run.run_name)
             with self._lock:
                 run.state, run.phase, run.message = "failed", None, str(exc)
         finally:
             with self._lock:
                 run.finished_at = datetime.now().isoformat(timespec="seconds")
-            # Keep the folder only if pages were left behind (a failure mid-rename), so nothing is lost.
-            if staging is not None and staging.exists() and not staged_pages(staging):
+            # Keep the folder if anything was left behind (a failure mid-rename, a BMP that couldn't be
+            # converted), so nothing is lost; stranded() and recover() pick it up from there.
+            if staging is not None and staging.exists() and not any(staging.iterdir()):
                 shutil.rmtree(staging, ignore_errors=True)
+            elif staging is not None and staging.exists():
+                left = len(list(staging.iterdir()))
+                log.warning("scan %s left %d file(s) in %s", run.run_name, left, staging)
+                with self._lock:
+                    run.warning = (run.warning + " " if run.warning else "") + (
+                        f"{left} file(s) could not be moved into the inbox; use Recover scans to retry."
+                    )
+
+    def stranded(self) -> list[dict]:
+        """Staging folders that still hold files, other than the run in progress."""
+        active = self._staging if self._run.state == "scanning" else None
+        return [
+            {"run": d.name.removeprefix(STAGING_PREFIX), "files": sum(1 for _ in d.iterdir())}
+            for d in sorted(self.inbox.glob(f"{STAGING_PREFIX}*")) if d.is_dir() and d != active and any(d.iterdir())
+        ] if self.inbox.exists() else []
+
+    def recover(self) -> dict:
+        """Finish every stranded run: convert leftover BMPs, place pages into the inbox under the run's own
+        name (so names can't collide with anything already ingested), and remove folders left empty.
+        Ingest picks the files up from the inbox like any other scan."""
+        with self._lock:
+            if self._run.state == "scanning":
+                raise RuntimeError("a scan is running; recover once it finishes")
+        from banana.scanner.twain_scan import convert_leftovers
+
+        recovered, kept = [], []
+        for item in self.stranded():
+            folder = self.inbox / f"{STAGING_PREFIX}{item['run']}"
+            try:
+                convert_leftovers(folder, self.cfg.mode)
+                pages = staged_pages(folder)
+                files = place_pages(pages, self.inbox, item["run"], self.cfg.duplex, self.cfg.first_side) if pages else []
+            except OSError:
+                log.exception("recovering %s failed", folder)
+                files = []
+            if not any(folder.iterdir()):
+                folder.rmdir()
+            else:
+                kept.append({"run": item["run"], "files": sum(1 for _ in folder.iterdir())})
+            if files:
+                recovered.append({"run": item["run"], "files": len(files)})
+            log.info("recovered scan %s: %d file(s) placed in the inbox", item["run"], len(files))
+        return {"recovered": recovered, "kept": kept}
 
 
 def _explain(output: str) -> str:

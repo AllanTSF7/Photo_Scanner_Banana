@@ -149,9 +149,12 @@ Use **Swap front/back**. If *every* scan is swapped, `scanner.first_side` doesn'
 change it between `back` (FF-680W, photos face down) and `front`.
 
 ### Leftover `.scanning-scan…` folder in the inbox
-Kept only when a scan stopped with pages still inside (for example the server restarted mid-scan). The pages
-are `page_0001.jpg`, … in scan order. Move them out and rename them to `<name>_0001.jpg` / `<name>_0001_b.jpg` pairs,
-or delete the folder and rescan.
+Kept only when a scan stopped with pages still inside (for example the app was closed mid-scan, or a page
+couldn't be moved). Nothing in it is deleted. The app shows a bar under the header saying how many runs and
+files were kept; **Recover scans** converts any leftover `.bmp` page, renames the pages into front/back pairs
+in the inbox and ingests them. The app also does this by itself on launch (`scanner.recover_on_start`). A page
+that can't be read is left in the folder and the bar says so. Recovered photos you had already rescanned
+show up as possible rescans; reject the copies.
 
 ### "Inbox has no new scans" after scanning
 1. Check that the Epson software saves into **the same folder** shown under `paths.inbox` in `/api/summary`.
@@ -280,11 +283,14 @@ Don't edit the database while the server is running unless you know what you're 
 | B-24 | Deleting a rejected scan left other scans saying "possible rescan of #N" for the deleted id forever | medium | fixed: `release_from_duplicate_group` re-anchors or clears followers before delete; `banana repair-duplicates` fixes data from before the fix; `test_deleting_a_duplicate_anchor_reassigns_its_follower` |
 | B-25 | Adding the Immich settings form broke every existing "Save the scan" UI test | medium | fixed: the Immich panel's own Save button is also `type="submit"`, so the generic `button[type=submit]` selector matched two elements; tests now scope to `#form button[type=submit]` |
 | B-26 | The guide tour silently derailed partway through after the Immich panel was added | medium | fixed: the tour targeted the untargeted `.grid2`/`.form-actions` classes, which the Immich panel also uses and which sit earlier in the page, so the tour highlighted the (hidden) Immich panel instead of the editor; tour steps now scope to `#form .grid2` / `#form .form-actions` |
+| B-27 | 12 TWAIN scan runs (2026-09-30) were reported as failed and their pages left in hidden `inbox/.scanning-*` folders | high | fixed: the driver raised after the last page arrived, before its BMP was converted; `acquire_pages` now converts leftovers and raises `ScanInterrupted`, the run places and ingests every page and shows a warning, the cause is logged, a bar under the header stays until dismissed, and **Recover scans** / launch finish older runs; `test_interrupted_run_still_reaches_the_inbox_with_a_visible_warning`, `test_recover_finishes_stranded_runs_into_the_inbox`, `test_scan_alert_recover_button_at_400px` |
+| B-28 | Two ingests in the same second failed with `UNIQUE constraint failed: batch.name` after moving files | medium | fixed: `_unique_batch_name` appends -2, -3…; found by `test_stranded_scan_runs_are_reported_and_recovered_into_review` |
+| B-29 | On Windows the live UI tests drove the real Epson scanner through TWAIN | medium | fixed: the test server pins `scanner.backend = "sane"` (the fake `scanimage`); tests that need it skip on Windows |
 
 #### B-6 Scan interrupted by a server restart
 Scans run inside the server process. Restarting it (deploy, crash, or the live dev server reloading after a
 code change) stops `scanimage` and leaves pages in `inbox/.scanning-…`. Don't restart during a scan. See section 2
-for recovering the pages. (Planned: run scans in the worker process.)
+for recovering the pages; since B-27 the app recovers them itself on the next launch.
 
 #### B-7 SANE limits
 `epsonds` offers up to 600 dpi for the FF-680W (Epson's own software also has 1200 dpi) and no FastFoto

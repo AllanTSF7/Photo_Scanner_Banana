@@ -155,6 +155,21 @@ input[data-state="suggested"], textarea[data-state="suggested"] { border-style: 
 .scanner-status.busy { color: var(--text-primary); }
 .scanner-status.busy::before { background: var(--accent); }
 
+/* Scan problems stay on screen until dismissed (a 6 s toast went unnoticed 12 times). Failure uses the
+   fail color; a warning is the same shape with a neutral edge and says so in words. */
+.scan-alert {
+  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+  margin: var(--space-3) var(--space-4) 0; padding: var(--space-3) var(--space-4);
+  background: var(--surface-raised);
+  border: var(--border-w) solid var(--border-strong);
+  border-left: calc(var(--border-w) * 4) solid var(--border-strong);
+  border-radius: var(--radius-md);
+}
+.scan-alert.failed { border-left-color: var(--status-fail); }
+.scan-alert-text { flex: 1 1 18rem; margin: 0; color: var(--text-primary); }
+.scan-alert-text strong { font-weight: 600; }
+.scan-alert-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+
 /* ---------- drawers ---------- */
 .drawer { padding: var(--space-4) var(--space-4) 0; }
 .panel-head { display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap; }

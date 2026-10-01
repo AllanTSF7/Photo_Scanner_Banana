@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import re
+import shutil
 import socket
 import stat
 import subprocess
@@ -85,7 +86,9 @@ def server(tmp_path, read_text):
         + "".join(f'{n} = "{(tmp_path / n).as_posix()}"\n' for n in ("inbox", "archive", "sorted", "data")).replace(
             "data =", "data_dir ="
         )
-        + f'[scanner]\nhost = "127.0.0.1"\nport = {fake_port.port}\nscanimage = "{scanimage.as_posix()}"\n'
+        # backend = "sane" always: on Windows "auto" means Epson's real TWAIN driver, and a test must never drive
+        # real hardware (it did before this was pinned - "No photos in the feeder" came from the real scanner).
+        + f'[scanner]\nhost = "127.0.0.1"\nport = {fake_port.port}\nbackend = "sane"\nscanimage = "{scanimage.as_posix()}"\n'
         + f"[analysis]\nread_text = {'true' if read_text else 'false'}\n",
         encoding="utf-8",
     )
@@ -115,6 +118,10 @@ def server(tmp_path, read_text):
 
 
 UI_USER, UI_PASSWORD = "operator", "ui-tests-password"
+
+# The fake scanimage is a POSIX shell script (same reason tests/test_scanner.py skips on Windows).
+needs_posix_scanner = pytest.mark.skipif(os.name == "nt", reason="fake scanimage is a POSIX script")
+needs_exiftool = pytest.mark.skipif(shutil.which("exiftool") is None, reason="exiftool not installed")
 
 
 def signed_in(browser, base, **kwargs):
@@ -409,6 +416,7 @@ def test_unsaved_edits_are_saved_when_switching(page):
 # ---------------------------------------------------------------- pipeline buttons
 
 
+@needs_exiftool
 def test_export_button(page, server):
     ingest(page)
     page.locator("#scan-list li").first.click()
@@ -444,6 +452,7 @@ def test_ingest_button_when_inbox_empty(page):
     expect(toast(page)).to_contain_text("Inbox has no new scans")
 
 
+@needs_posix_scanner
 def test_scan_feeder_button(page):
     expect(page.locator("#scanner-status")).to_have_text("Scanner online")
     page.click("#btn-scan")
@@ -455,6 +464,7 @@ def test_scan_feeder_button(page):
     expect(page.locator("#scan-list li")).to_have_count(9)
 
 
+@needs_posix_scanner
 def test_scan_destination_dropdown_leave_in_inbox(page, server):
     select = page.locator("#scan-destination")
     expect(select).to_be_visible()
@@ -475,6 +485,7 @@ def test_scan_destination_dropdown_leave_in_inbox(page, server):
     ingest(page, count=9)
 
 
+@needs_posix_scanner
 def test_system_health_indicator_and_panel(page):
     button = page.locator("#btn-health")
     expect(button).to_be_enabled()
@@ -501,6 +512,7 @@ def test_system_health_indicator_and_panel(page):
     expect(panel).to_be_hidden()
 
 
+@needs_posix_scanner
 def test_health_reports_scanner_offline(browser, server, tmp_path):
     import tomllib
 
@@ -587,6 +599,7 @@ def test_swap_and_redetect_buttons(page):
     expect(page.locator("#btn-redetect")).to_be_enabled()
 
 
+@needs_posix_scanner
 def test_feed_dropdown_one_photo(page, server):
     select = page.locator("#scan-count")
     expect(select.locator("option")).to_have_text(["Whole stack", "One photo"])
@@ -1303,4 +1316,63 @@ def test_sign_in_page_wrong_password_then_sign_in_and_sign_out_at_400px(browser,
     expect(pg).to_have_url(server["base"] + "/login")
     pg.goto(server["base"] + "/")
     expect(pg).to_have_url(server["base"] + "/login")  # the session really ended
+    context.close()
+
+
+# ---------------------------------------------------------------- scan problems stay visible
+
+
+def _strand_run(root, name="scan20260930132056"):
+    """A scan run that stopped before its pages reached the inbox: 3 JPEGs + the driver's unconverted last BMP."""
+    from PIL import Image
+
+    folder = root / "inbox" / f".scanning-{name}"
+    folder.mkdir()
+    for n in (1, 2, 3):
+        Image.new("RGB", (400, 300), (40 * n, 90, 60)).save(folder / f"page_{n:04d}.jpg", "JPEG")
+    Image.new("RGB", (400, 300), (200, 90, 60)).save(folder / "page_0004.bmp", "BMP")
+    return folder
+
+
+def test_scan_alert_recover_button_at_400px(browser, server):
+    folder = _strand_run(server["root"])
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+
+    alert = pg.locator("#scan-alert")
+    expect(alert).to_be_visible()
+    expect(alert).to_contain_text("stopped before 4 files reached the review queue")
+    expect(alert).to_have_attribute("role", "alert")
+    assert no_horizontal_scroll(pg)
+
+    recover = pg.locator("#btn-recover")
+    expect(recover).to_be_visible()
+    expect(recover).to_be_enabled()
+    recover.click()
+    expect(toast(pg)).to_contain_text("Recovered 4 file(s)")
+    expect(alert).to_be_hidden()
+    assert not folder.exists()
+    expect(pg.locator("#scan-list li")).to_have_count(9)  # 2 recovered photos + the 7 demo scans
+    context.close()
+
+
+def test_scan_alert_dismiss_button_at_400px_and_comes_back_when_something_changes(browser, server):
+    _strand_run(server["root"])
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+
+    dismiss = pg.locator("#btn-scan-alert-dismiss")
+    expect(dismiss).to_be_visible()
+    expect(dismiss).to_be_enabled()
+    dismiss.click()
+    expect(pg.locator("#scan-alert")).to_be_hidden()
+    pg.reload()
+    expect(pg.locator("#scan-alert")).to_be_hidden()  # dismissed stays dismissed
+
+    _strand_run(server["root"], name="scan20260930141529")
+    pg.reload()
+    expect(pg.locator("#scan-alert")).to_be_visible()  # a new problem shows again
+    expect(pg.locator("#scan-alert")).to_contain_text("2 scan runs stopped")
     context.close()

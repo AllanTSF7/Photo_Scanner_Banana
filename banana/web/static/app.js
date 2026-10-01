@@ -890,11 +890,56 @@ $("scan-count").addEventListener("change", () => {
   $("btn-scan").textContent = $("scan-count").value === "one" ? "Scan one photo" : "Scan feeder";
 });
 
+// Scan problems stay visible until dismissed, and come back if anything about them changes. A toast was the
+// only signal before, and 12 failed runs (with their pages kept in a hidden folder) went unnoticed that way.
+let scanAlertKey = "";
+function renderScanAlert(s) {
+  const run = s.scan || {};
+  const stranded = s.stranded || [];
+  const parts = [];
+  const failed = run.state === "failed";
+  if (failed) parts.push(`<strong>Scan ${run.run_name || ""} failed.</strong> ${escapeHtml(run.message || "")}`);
+  if (run.warning && run.state !== "scanning") parts.push(`<strong>Scan ${run.run_name || ""} finished with a problem.</strong> ${escapeHtml(run.warning)}`);
+  if (stranded.length) {
+    const files = stranded.reduce((n, r) => n + r.files, 0);
+    parts.push(`${stranded.length} scan run${stranded.length === 1 ? "" : "s"} stopped before ${files} file${files === 1 ? "" : "s"} reached the review queue. They were kept; Recover scans adds them to the queue.`);
+  }
+  const key = JSON.stringify([run.run_name, run.state, run.warning, stranded]);
+  let dismissed = "";
+  try { dismissed = localStorage.getItem("scanAlertDismissed") || ""; } catch { /* storage unavailable */ }
+  const box = $("scan-alert");
+  scanAlertKey = key;
+  if (!parts.length || dismissed === key) { box.hidden = true; return; }
+  $("scan-alert-text").innerHTML = parts.join(" ");
+  box.classList.toggle("failed", failed);
+  $("btn-recover").hidden = !stranded.length;
+  $("btn-recover").disabled = run.state === "scanning";
+  box.hidden = false;
+}
+
+$("btn-scan-alert-dismiss").onclick = () => {
+  try { localStorage.setItem("scanAlertDismissed", scanAlertKey); } catch { /* storage unavailable */ }
+  $("scan-alert").hidden = true;
+};
+
+$("btn-recover").onclick = () => withButton($("btn-recover"), async () => {
+  const r = await api("POST", "/api/scanner/recover");
+  const placed = r.recovered.reduce((n, x) => n + x.files, 0);
+  const created = r.ingest?.created?.length ?? 0;
+  const dups = r.ingest?.possible_duplicates?.length ?? 0;
+  const lines = [`Recovered ${placed} file(s); ${created} scan(s) added to review${dups ? `, ${dups} possible rescan(s)` : ""}`];
+  if (r.kept.length) lines.push(`${r.kept.reduce((n, x) => n + x.files, 0)} file(s) still could not be read and were left in place`);
+  toast(lines.join("\n"), r.kept.length > 0);
+  await loadScannerStatus();
+  if (created) await selectTab("needs_review");
+});
+
 function renderScanner(s) {
   const el = $("scanner-status");
   const button = $("btn-scan");
   const destination = $("scan-destination-wrap");
   const count = $("scan-count-wrap");
+  renderScanAlert(s);
   if (!s.configured) { el.hidden = true; button.hidden = true; destination.hidden = true; count.hidden = true; return; }
   const scanning = s.scan?.state === "scanning";
   el.hidden = false;

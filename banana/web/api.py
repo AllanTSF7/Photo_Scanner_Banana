@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import re
 import threading
@@ -250,18 +251,44 @@ def scanner_status() -> dict:
     """Whether the configured network scanner answers on its scan port (TCP connect, 1.5 s timeout)."""
     cfg = settings.scanner
     if not cfg.host:
-        return {"configured": False}
+        return {"configured": False, "stranded": scans.stranded()}
     return {
         "configured": True, "host": cfg.host, "port": cfg.port, "online": sane.is_online(cfg),
         "device": cfg.device, "source": cfg.source, "mode": cfg.mode, "resolution": cfg.resolution,
         "after_scan": cfg.after_scan, "duplex": cfg.duplex, "max_feeder_count": cfg.max_feeder_count,
-        "scan": scans.status(),
+        "scan": scans.status(), "stranded": scans.stranded(),
     }
 
 
 def _ingest_after_scan() -> dict:
     with db.session(engine) as session:
         return ingest_inbox(session, settings).__dict__
+
+
+@app.post("/api/scanner/recover", tags=["scanner"])
+def recover_scans() -> dict:
+    """Finish scan runs that stopped before their pages reached the inbox, then ingest them for review."""
+    try:
+        result = scans.recover()
+    except RuntimeError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    if result["recovered"]:
+        result["ingest"] = _ingest_after_scan()
+    return result
+
+
+def _recover_at_startup() -> None:
+    """A run cut off by a crash or a closed app leaves its pages in a hidden staging folder: finish those
+    on launch so they reach the review queue without anyone having to know the folder exists."""
+    try:
+        if scans.stranded():
+            recover_scans()
+    except Exception:  # noqa: BLE001 - never stop the app from starting; the banner still offers Recover
+        logging.getLogger("banana.scanner").exception("recovering stranded scans at startup failed")
+
+
+if settings.scanner.recover_on_start:
+    threading.Thread(target=_recover_at_startup, daemon=True, name="recover-scans").start()
 
 
 class ScanRequest(BaseModel):

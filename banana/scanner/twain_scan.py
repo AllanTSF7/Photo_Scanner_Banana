@@ -19,6 +19,45 @@ JPEG_QUALITY = 95
 _PIXEL_TYPES = {"Color": "TWPT_RGB", "Gray": "TWPT_GRAY", "Lineart": "TWPT_BW"}
 
 
+class ScanInterrupted(RuntimeError):
+    """The driver raised after handing over at least one page. The pages are on disk and usable; the run
+    should still place and ingest them, and say what stopped it. (Real case, 2026-09-30: 12 runs where
+    the driver raised after the last transfer, before its BMP was converted - every page was fine, but
+    the whole run was reported as failed and left in a hidden staging folder.)"""
+
+    def __init__(self, pages: list[Path], cause: BaseException) -> None:
+        self.pages = pages
+        self.cause = cause
+        super().__init__(f"the scanner driver stopped after {len(pages)} page(s): {describe_error(cause)}")
+
+
+def describe_error(exc: BaseException) -> str:
+    """Exception class plus message plus any TWAIN condition code pytwain attached, for the log and the UI."""
+    text = f"{type(exc).__name__}: {exc}" if str(exc) else type(exc).__name__
+    for attr in ("condition_code", "cc", "status"):
+        value = getattr(exc, attr, None)
+        if value is not None:
+            text += f" ({attr}={value})"
+    return text
+
+
+def convert_leftovers(staging: Path, mode: str = "Color") -> list[Path]:
+    """Convert any page_NNNN.bmp the driver wrote but never got converted into page_NNNN.jpg. A BMP that
+    can't be decoded (the transfer itself was cut off) is left exactly where it is, never deleted."""
+    converted = []
+    for bmp in sorted(staging.glob("page_*.bmp")):
+        jpg = bmp.with_suffix(".jpg")
+        try:
+            with Image.open(bmp) as image:
+                image.convert("L" if mode in ("Gray", "Lineart") else "RGB").save(jpg, "JPEG", quality=JPEG_QUALITY)
+        except OSError:
+            jpg.unlink(missing_ok=True)
+            continue
+        os.remove(bmp)
+        converted.append(jpg)
+    return converted
+
+
 def _current(result):
     """Current value from a pytwain get_capability result (a one-value or an enumeration container)."""
     _, value = result
@@ -89,7 +128,13 @@ def acquire_pages(cfg: ScannerConfig, staging: Path, count: str = "all", twain=N
                 os.remove(bmp)
                 pages.append(jpg)
 
-            src.acquire_file(before=before, after=after, show_ui=False, modal=False)
+            try:
+                src.acquire_file(before=before, after=after, show_ui=False, modal=False)
+            except Exception as exc:  # noqa: BLE001 - keep whatever pages arrived, then report the cause
+                pages.extend(convert_leftovers(staging, cfg.mode))
+                if not pages:
+                    raise
+                raise ScanInterrupted(sorted(pages), exc) from exc
         finally:
             src.close()
     finally:

@@ -143,3 +143,112 @@ def test_auto_backend_is_twain_on_windows_and_sane_elsewhere(monkeypatch):
     monkeypatch.setattr(config.sys, "platform", "linux")
     assert ScannerConfig().effective_backend == "sane"
     assert ScannerConfig(backend="twain").effective_backend == "twain"
+
+
+def _fake_twain_that_raises_after_last_page(pages: int, exc: Exception):
+    """The 2026-09-30 failure: the driver hands over the last page (its BMP is written) and then raises
+    before after() runs, so that page is never converted and acquire_file errors out."""
+    fake = _fake_twain(pages=pages)
+    source_cls = fake.SourceManager().open_source("x").__class__
+
+    def acquire_file(self, before, after, show_ui, modal):
+        for n in range(pages):
+            path = before({})
+            Image.new("RGB", (40, 30), (10 * n, 80, 120)).save(path, "BMP")
+            if n < pages - 1:
+                after(pages - n - 1)
+        raise exc
+
+    source_cls.acquire_file = acquire_file
+    fake.opened.clear()
+    return fake
+
+
+def _wait(ctl):
+    for _ in range(200):
+        if ctl.status()["state"] != "scanning":
+            return ctl.status()
+        time.sleep(0.05)
+    raise AssertionError("scan never finished")
+
+
+def test_driver_error_after_the_last_page_keeps_every_page(tmp_path):
+    from banana.scanner.twain_scan import ScanInterrupted
+
+    fake = _fake_twain_that_raises_after_last_page(4, OSError("transfer ended"))
+    with pytest.raises(ScanInterrupted) as info:
+        acquire_pages(ScannerConfig(host="x"), tmp_path, count="all", twain=fake)
+    assert [p.name for p in info.value.pages] == ["page_0001.jpg", "page_0002.jpg", "page_0003.jpg", "page_0004.jpg"]
+    assert not list(tmp_path.glob("*.bmp"))  # the unconverted last page was converted, not left behind
+    assert "transfer ended" in str(info.value)
+    assert fake.closed == ["source", "manager"]
+
+
+def test_driver_error_before_any_page_is_still_a_failure(tmp_path):
+    fake = _fake_twain_that_raises_after_last_page(0, OSError("paper jam"))
+    with pytest.raises(OSError, match="paper jam"):
+        acquire_pages(ScannerConfig(host="x"), tmp_path, twain=fake)
+
+
+def test_interrupted_run_still_reaches_the_inbox_with_a_visible_warning(tmp_path, monkeypatch, caplog):
+    fake = _fake_twain_that_raises_after_last_page(4, OSError("transfer ended"))
+    from banana.scanner import twain_scan
+
+    monkeypatch.setattr(twain_scan, "acquire_pages", lambda cfg, staging, count: acquire_pages(cfg, staging, count, twain=fake))
+    ctl = sane.ScanController(ScannerConfig(host="h", backend="twain"), tmp_path / "inbox")
+    with caplog.at_level("INFO", logger="banana.scanner"):
+        ctl.start(destination="inbox")
+        status = _wait(ctl)
+
+    assert status["state"] == "done"
+    assert "transfer ended" in status["warning"] and "4 page(s)" in status["warning"]
+    assert len(status["files"]) == 4
+    assert ctl.stranded() == []  # nothing left in a hidden staging folder
+    assert "transfer ended" in caplog.text  # the cause is in the log, not only on screen
+
+
+def _stranded_run(inbox, name, jpgs, bmp=True, broken_bmp=False):
+    folder = inbox / f".scanning-{name}"
+    folder.mkdir(parents=True)
+    for n in range(1, jpgs + 1):
+        Image.new("RGB", (40, 30), (n, 80, 120)).save(folder / f"page_{n:04d}.jpg", "JPEG")
+    if bmp:
+        Image.new("RGB", (40, 30), (200, 80, 120)).save(folder / f"page_{jpgs + 1:04d}.bmp", "BMP")
+    if broken_bmp:
+        (folder / f"page_{jpgs + 2:04d}.bmp").write_bytes(b"BM" + b"\0" * 20)  # a transfer cut off mid-file
+    return folder
+
+
+def test_recover_finishes_stranded_runs_into_the_inbox(tmp_path):
+    inbox = tmp_path / "inbox"
+    folder = _stranded_run(inbox, "scan20260930132056", jpgs=3)  # 3 JPEGs + the unconverted last BMP
+    ctl = sane.ScanController(ScannerConfig(host="h", backend="twain", first_side="back"), inbox)
+
+    assert ctl.stranded() == [{"run": "scan20260930132056", "files": 4}]
+    result = ctl.recover()
+
+    assert result == {"recovered": [{"run": "scan20260930132056", "files": 4}], "kept": []}
+    assert not folder.exists()
+    assert sorted(p.name for p in inbox.iterdir()) == [
+        "scan20260930132056_0001.jpg", "scan20260930132056_0001_b.jpg",
+        "scan20260930132056_0002.jpg", "scan20260930132056_0002_b.jpg",
+    ]
+    assert ctl.stranded() == []
+
+
+def test_recover_never_deletes_a_page_it_cannot_read(tmp_path):
+    inbox = tmp_path / "inbox"
+    folder = _stranded_run(inbox, "scan1", jpgs=2, bmp=False, broken_bmp=True)
+    ctl = sane.ScanController(ScannerConfig(host="h", backend="twain"), inbox)
+
+    result = ctl.recover()
+    assert result["recovered"] == [{"run": "scan1", "files": 2}]
+    assert result["kept"] == [{"run": "scan1", "files": 1}]
+    assert (folder / "page_0004.bmp").exists()  # left exactly where it was for a person to look at
+
+
+def test_recover_refuses_while_a_scan_is_running(tmp_path):
+    ctl = sane.ScanController(ScannerConfig(host="h", backend="twain"), tmp_path / "inbox")
+    ctl._run = sane.ScanRun(state="scanning")
+    with pytest.raises(RuntimeError, match="scan is running"):
+        ctl.recover()
