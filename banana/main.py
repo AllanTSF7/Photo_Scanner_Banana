@@ -144,7 +144,9 @@ def serve(host: str = "127.0.0.1", port: int = 8000) -> None:
     """Loopback by default; pass --host explicitly (e.g. the Tailscale IP) to listen elsewhere."""
     import uvicorn
 
-    uvicorn.run("banana.web.api:app", host=host, port=port)
+    from banana.logs import uvicorn_log_config
+
+    uvicorn.run("banana.web.api:app", host=host, port=port, log_config=uvicorn_log_config(None))
 
 
 @cli.command()

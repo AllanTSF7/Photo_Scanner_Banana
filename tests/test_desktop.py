@@ -78,7 +78,10 @@ def test_redirect_streams_replaces_none_stdout_stderr_stdin(tmp_path, monkeypatc
     assert desktop.sys.stdout.isatty() is False
     assert desktop.sys.stderr is not None
     assert desktop.sys.stdin is not None
-    assert (log_dir / "photoscanner.log").exists()
+    # Stray output goes to its own file: the rotating photoscanner.log can't roll over on Windows while
+    # another handle (this redirect) holds it open.
+    assert (log_dir / desktop.CONSOLE_LOG).exists()
+    assert not (log_dir / "photoscanner.log").exists()
 
 
 def test_redirect_streams_leaves_real_streams_alone(tmp_path, monkeypatch):

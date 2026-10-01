@@ -17,6 +17,8 @@ import webbrowser
 from pathlib import Path
 
 DEFAULT_PORT = 8420  # unlikely to collide with anything else already on the machine
+CONSOLE_LOG = "console.log"  # stray stdout/stderr only; the real log is banana.logs.LOG_NAME
+CONSOLE_MAX_BYTES = 5 * 1024 * 1024
 
 _CONFIG_TEMPLATE = """\
 # Generated on first run. Safe to edit; the app never overwrites an existing config.toml.
@@ -88,11 +90,15 @@ def _redirect_streams_if_windowed(log_dir: Path) -> None:
     terminal on launch) sets sys.stdout/stderr/stdin to actually None, not just closed. Nothing that
     assumes a real stream survives that - uvicorn's own logging setup calls sys.stdout.isatty() and
     crashes with "Unable to configure formatter 'default'" before the server ever starts. Redirecting
-    to a log file both fixes that and gives us something to look at from a machine we can't see."""
+    to a file both fixes that and keeps stray output (a crash before logging is set up) somewhere we can
+    see it. A separate file from photoscanner.log: Windows can't rotate a log another handle has open."""
     if sys.stdout is not None and sys.stderr is not None:
         return
     log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = open(log_dir / "photoscanner.log", "a", buffering=1, encoding="utf-8")
+    console = log_dir / CONSOLE_LOG
+    if console.exists() and console.stat().st_size > CONSOLE_MAX_BYTES:
+        console.replace(console.with_suffix(".log.1"))
+    log_file = open(console, "a", buffering=1, encoding="utf-8")
     sys.stdout = sys.stdout or log_file
     sys.stderr = sys.stderr or log_file
     if sys.stdin is None:
@@ -170,7 +176,8 @@ def _open_browser_when_ready(url: str, host: str, port: int) -> None:
 
 def main() -> None:
     app_dir = _app_dir()
-    _redirect_streams_if_windowed(_data_home() / "logs")
+    log_dir = _data_home() / "logs"
+    _redirect_streams_if_windowed(log_dir)
     host, port = "127.0.0.1", DEFAULT_PORT
     url = f"http://{host}:{port}/"
 
@@ -189,8 +196,10 @@ def main() -> None:
 
     import uvicorn
 
+    from banana.logs import uvicorn_log_config
+
     threading.Thread(target=_open_browser_when_ready, args=(url, host, port), daemon=True).start()
-    uvicorn.run("banana.web.api:app", host=host, port=port, log_level="info")
+    uvicorn.run("banana.web.api:app", host=host, port=port, log_config=uvicorn_log_config(log_dir))
 
 
 if __name__ == "__main__":
