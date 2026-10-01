@@ -1,0 +1,423 @@
+<!DOCTYPE html>
+<html lang="en" style="color-scheme: dark">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Export Flow Walkthrough</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: { extend: { colors: {
+      wt: {
+        bg: '#000000', surface: '#0a0a0a', raised: '#141414',
+        border: '#2a2a2a', fg: '#ffffff', muted: '#a0a0a0',
+        accent: '#a855f7', file: '#c084fc', red: '#ef4444',
+      },
+      node: {
+        component: '#a855f7', composable: '#7c3aed', utility: '#6d28d9',
+        external: '#525252', event: '#d8b4fe', data: '#9333ea',
+      },
+    }}},
+  };
+</script>
+<script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<style>
+  body { margin: 0; }
+  .mermaid-wrap svg { max-width: none !important; height: auto !important; }
+  .mermaid-wrap .node { cursor: pointer; }
+  .mermaid-wrap .node:hover rect,
+  .mermaid-wrap .node:hover polygon,
+  .mermaid-wrap .node:hover circle,
+  .mermaid-wrap .node:hover .label-container { filter: brightness(1.3); transition: filter .15s; }
+  .dt-body p { color:#a0a0a0; font-size:.88rem; line-height:1.65; margin-bottom:10px; }
+  .dt-body .shiki, .dt-body pre.code-fallback {
+    background: #000000; border: 1px solid #2a2a2a; border-radius: 8px;
+    padding: 14px 16px; overflow-x: auto; margin: 8px 0 14px;
+  }
+  .dt-body .shiki { background: #000000 !important; }
+  .dt-body .shiki code, .dt-body pre.code-fallback code {
+    font-family: 'SF Mono','Fira Code',monospace; font-size: .78rem; line-height: 1.55;
+    background: none; padding: 0; border-radius: 0;
+  }
+  .dt-body .shiki code { color: inherit; }
+  .dt-body pre.code-fallback code { color: #e0e0e0; }
+</style>
+</head>
+<body class="bg-wt-bg text-wt-fg">
+<div id="root"></div>
+<script type="module">
+import { createHighlighter } from 'https://cdn.jsdelivr.net/npm/shiki@3.22.0/+esm'
+const { useState, useEffect, useRef, useCallback } = React;
+const h = React.createElement;
+
+const SUMMARY = "Clicking Export in the desktop app asks for confirmation, then POSTs /api/export to the local server inside PhotoScanner.exe. For every approved scan, the server copies (or re-encodes, if cropped/rotated) the original into <sorted>/.staging, embeds EXIF/XMP and writes a .xmp sidecar with the bundled exiftool.exe, reads both back to verify, then os.replace()s the sidecar and then the image into C:/PhotoScanner/sorted/<year>/<date>/. Originals are only read; the scan is marked EXPORTED and an Export row records the path and checksums.";
+
+const DIAGRAM = `graph TD
+  subgraph ui["In the App Window"]
+    exportButton(["Export button click"])
+    confirmDialog["Confirm dialog"]
+  end
+  subgraph server["Local Server inside the .exe"]
+    exportEndpoint["Export endpoint"]
+    approvedScans[("Approved scans")]
+    exportService["Per-scan export"]
+  end
+  subgraph pipeline["Staging Pipeline"]
+    exporter["Staging area"]
+    prepareSide["Copy or re-encode image"]
+    exiftool["Bundled ExifTool"]
+    atomicMove["Atomic move into place"]
+  end
+  subgraph result["Where It Lands"]
+    libraryFolder["Library folder for Immich"]
+    exportRecord[("Export record + status")]
+  end
+
+  exportButton -->|"opens"| confirmDialog
+  confirmDialog -->|"sends POST"| exportEndpoint
+  exportEndpoint -->|"reads"| approvedScans
+  exportEndpoint -->|"loops each scan into"| exportService
+  exportService -->|"hands request to"| exporter
+  exporter -->|"per side A / B"| prepareSide
+  prepareSide -->|"writes + verifies with"| exiftool
+  exiftool -->|"verified files to"| atomicMove
+  atomicMove ==>|"sidecar first, then image"| libraryFolder
+  exportService -->|"saves"| exportRecord
+  exportRecord -.->|"result shown as toast"| exportButton
+
+  click exportButton nodeClickHandler "View details"
+  click confirmDialog nodeClickHandler "View details"
+  click exportEndpoint nodeClickHandler "View details"
+  click approvedScans nodeClickHandler "View details"
+  click exportService nodeClickHandler "View details"
+  click exporter nodeClickHandler "View details"
+  click prepareSide nodeClickHandler "View details"
+  click exiftool nodeClickHandler "View details"
+  click atomicMove nodeClickHandler "View details"
+  click libraryFolder nodeClickHandler "View details"
+  click exportRecord nodeClickHandler "View details"
+
+  classDef component fill:#a855f7,stroke:#c084fc,color:#fff
+  classDef composable fill:#7c3aed,stroke:#a78bfa,color:#fff
+  classDef utility fill:#6d28d9,stroke:#8b5cf6,color:#fff
+  classDef external fill:#525252,stroke:#737373,color:#fff
+  classDef event fill:#d8b4fe,stroke:#e9d5ff,color:#000
+  classDef data fill:#9333ea,stroke:#a855f7,color:#fff
+  class exportButton event
+  class confirmDialog component
+  class exportEndpoint,exportService composable
+  class exporter,prepareSide,atomicMove utility
+  class exiftool,libraryFolder external
+  class approvedScans,exportRecord data
+`;
+
+const NODES = {
+  exportButton: {
+    title: "Export button click",
+    description: "The Export button in the app window. It refreshes the approved count first and bails out with a toast if nothing is approved.",
+    files: ["banana/web/static/app.js:849-865"],
+    code: `$("btn-export").onclick = () => withButton($("btn-export"), async () => {
+  if (!(await confirmLeave())) return;
+  await loadSummary();
+  const approved = state.counts.approved ?? 0;
+  if (!approved) { toast("Nothing approved to export"); return; }`,
+    lang: "javascript",
+  },
+  confirmDialog: {
+    title: "Confirm dialog",
+    description: "Export writes into the folder Immich reads, so it is treated as irreversible and needs an explicit confirm. Only on OK does the browser call the API.",
+    files: ["banana/web/static/app.js:854-860"],
+    code: `const ok = await confirmAction({
+  title: \`Export \${approved} approved scan(s)?\`,
+  body: "Photos and their metadata are written to the library folder that Immich reads.",
+});
+if (!ok) return;
+const r = await api("POST", "/api/export");`,
+    lang: "javascript",
+  },
+  exportEndpoint: {
+    title: "Export endpoint (POST /api/export)",
+    description: "The FastAPI route served by the local server the .exe starts. It opens one ExifTool process for the whole run and exports scans one by one; a failure rolls back just that scan and is reported, the others continue.",
+    files: ["banana/web/api.py:594-613", "banana/desktop.py (launches the server)"],
+    code: `with ExifToolWriter(settings.exiftool.path) as writer:
+    exporter = Exporter(settings.paths.sorted, writer)
+    for scan in scans:
+        try:
+            record = export_scan(session, scan, exporter)`,
+    lang: "python",
+  },
+  approvedScans: {
+    title: "Approved scans",
+    description: "Only scans with status APPROVED are picked up from the SQLite DB in %LOCALAPPDATA%/PhotoScanner/data/banana.db. Pending and rejected scans are never exported.",
+    files: ["banana/web/api.py:601", "banana/models.py"],
+    code: `scans = list(session.exec(select(Scan).where(Scan.status == ScanStatus.APPROVED.value)))`,
+    lang: "python",
+  },
+  exportService: {
+    title: "Per-scan export",
+    description: "Turns a DB row into an export request: builds PhotoMetadata (date, people, places, events, tags, box label), the crop/rotation edits, and looks up any previous export so a re-export can clean up old files.",
+    files: ["banana/export/service.py:89-126"],
+    code: `meta = PhotoMetadata(
+    date=scan.photo_date(), description=scan.description or "",
+    people=list(scan.people), places=list(scan.places), events=list(scan.events),
+    tags=list(scan.tags), box_label=batch.box_label)
+result = exporter.export(request, previous)`,
+    lang: "python",
+  },
+  exporter: {
+    title: "Staging area",
+    description: "Creates a fresh <sorted>/.staging/scan_NNNNNN folder on the same disk as the library, prepares every side there, and always deletes it afterwards. Nothing touches the real library until both sides are verified.",
+    files: ["banana/export/exporter.py:59-81", "banana/export/layout.py:11"],
+    code: `staging = self.root / layout.STAGING_DIR / f"scan_{req.scan_id:06d}"
+shutil.rmtree(staging, ignore_errors=True)
+staging.mkdir(parents=True)
+prepared = [self._prepare(req, side, src, edit, staging) for side, src, edit in sides]`,
+    lang: "python",
+  },
+  prepareSide: {
+    title: "Copy or re-encode image",
+    description: "Front is side A, back is side B (only if kept). An unedited image is byte-copied; a cropped or rotated one is re-encoded as JPEG. The target name/folder comes from the photo date, e.g. 1987/1987-07/SCAN_000042_A.jpg.",
+    files: ["banana/export/exporter.py:83-99", "banana/export/layout.py:21-43", "banana/imaging.py"],
+    code: `rel = layout.relative_path(req.scan_id, side, suffix, req.meta.date, req.batch_name)
+if edit.is_identity:
+    shutil.copyfile(src, staged)
+else:
+    save_edited(src, staged, edit)`,
+    lang: "python",
+  },
+  exiftool: {
+    title: "Bundled ExifTool",
+    description: "The exiftool.exe shipped in the .exe's _internal/tools folder (path written into config.toml on first run). It embeds EXIF/XMP into the staged image, copies the XMP into a .xmp sidecar, then both are read back and compared field by field; any mismatch aborts that scan.",
+    files: ["banana/export/exiftool_writer.py:57-100", "banana/desktop.py:70-75"],
+    code: `self.writer.write_image(staged, req.meta, is_back=is_back)
+self.writer.write_sidecar(staged, sidecar)
+self.writer.verify(staged, req.meta, is_back=is_back, xmp_only=False)
+self.writer.verify(sidecar, req.meta, is_back=is_back, xmp_only=True)`,
+    lang: "python",
+  },
+  atomicMove: {
+    title: "Atomic move into place",
+    description: "If this scan was exported before under a different path, the old image and sidecar are deleted. Then each file is moved with os.replace, sidecar first, so Immich never sees an image without its metadata.",
+    files: ["banana/export/exporter.py:101-113"],
+    code: `dest = self.root / rel
+dest.parent.mkdir(parents=True, exist_ok=True)
+os.replace(staged.with_name(layout.sidecar_name(staged.name)), dest.with_name(layout.sidecar_name(dest.name)))
+os.replace(staged, dest)`,
+    lang: "python",
+  },
+  libraryFolder: {
+    title: "Library folder for Immich",
+    description: "On this machine the configured sorted folder is C:/PhotoScanner/sorted. Undated scans go under undated/<batch>; Immich should exclude **/.staging/**.",
+    files: ["%LOCALAPPDATA%/PhotoScanner/config/config.toml", "banana/export/layout.py:21-31"],
+    code: `[paths]
+sorted = "C:/PhotoScanner/sorted"
+
+[exiftool]
+path = ".../PhotoScanner/_internal/tools/exiftool/exiftool.exe"`,
+    lang: "toml",
+  },
+  exportRecord: {
+    title: "Export record + status",
+    description: "An Export row stores the library paths plus sha256 (change detection) and sha1 (Immich dedup) for each side, and clears any stale Immich check. The scan moves to EXPORTED and the UI shows the exported/failed counts.",
+    files: ["banana/export/service.py:114-126", "banana/web/static/app.js:861-864"],
+    code: `record.front_rel, record.front_sha256, record.front_sha1 = str(result.front_rel), result.front_sha256, result.front_sha1
+record.immich_front_id = record.immich_back_id = record.immich_checked_at = None
+scan.status = ScanStatus.EXPORTED.value
+session.commit()`,
+    lang: "python",
+  },
+};
+
+const LEGEND = [
+  { label: 'User action', color: 'bg-node-event' },
+  { label: 'UI', color: 'bg-node-component' },
+  { label: 'Server logic', color: 'bg-node-composable' },
+  { label: 'File operations', color: 'bg-node-utility' },
+  { label: 'Data', color: 'bg-node-data' },
+  { label: 'External / disk', color: 'bg-node-external' },
+];
+
+const langs = [...new Set(Object.values(NODES).map(n => n.lang).filter(Boolean))];
+if (langs.length === 0) langs.push('typescript');
+let highlighter = null;
+try { highlighter = await createHighlighter({ themes: ['vitesse-dark'], langs }); }
+catch (e) { console.warn('Shiki failed:', e); }
+const HIGHLIGHTED = {};
+for (const [id, node] of Object.entries(NODES)) {
+  if (node.code && highlighter) {
+    try { HIGHLIGHTED[id] = highlighter.codeToHtml(node.code, { lang: node.lang || 'typescript', theme: 'vitesse-dark' }); }
+    catch (e) { console.warn(`Highlight failed for ${id}:`, e); }
+  }
+}
+
+function usePanZoom() {
+  const viewportRef = useRef(null), canvasRef = useRef(null), zoomDisplayRef = useRef(null);
+  const st = useRef({ zoom: 1, panX: 0, panY: 0 });
+  const drag = useRef({ on: false, lx: 0, ly: 0 });
+  const apply = useCallback(() => {
+    const { zoom, panX, panY } = st.current;
+    if (canvasRef.current) canvasRef.current.style.transform = `translate(${panX}px,${panY}px) scale(${zoom})`;
+    if (zoomDisplayRef.current) zoomDisplayRef.current.textContent = Math.round(zoom * 100) + '%';
+  }, []);
+  const fitToScreen = useCallback(() => {
+    const svg = canvasRef.current?.querySelector('svg');
+    const vp = viewportRef.current;
+    if (!svg || !vp) return;
+    const s = st.current;
+    const vw = vp.clientWidth, vh = vp.clientHeight;
+    const sw = svg.getBoundingClientRect().width / s.zoom;
+    const sh = svg.getBoundingClientRect().height / s.zoom;
+    const fit = Math.max(0.15, Math.min(2, Math.min((vw - 80) / sw, (vh - 80) / sh)));
+    s.zoom = fit; s.panX = (vw - sw * fit) / 2; s.panY = (vh - sh * fit) / 2;
+    apply();
+  }, [apply]);
+  useEffect(() => {
+    const vp = viewportRef.current;
+    if (!vp) return;
+    const onWheel = (e) => {
+      e.preventDefault();
+      const r = vp.getBoundingClientRect();
+      const mx = e.clientX - r.left, my = e.clientY - r.top, s = st.current;
+      const f = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+      const nz = Math.min(4, Math.max(0.15, s.zoom * f)), sc = nz / s.zoom;
+      s.panX = mx - sc * (mx - s.panX); s.panY = my - sc * (my - s.panY); s.zoom = nz;
+      apply();
+    };
+    const onDown = (e) => {
+      if (e.target.closest('.node')) return;
+      drag.current = { on: true, lx: e.clientX, ly: e.clientY };
+      vp.setPointerCapture(e.pointerId);
+    };
+    const onMove = (e) => {
+      const d = drag.current; if (!d.on) return;
+      st.current.panX += e.clientX - d.lx; st.current.panY += e.clientY - d.ly;
+      d.lx = e.clientX; d.ly = e.clientY; apply();
+    };
+    const onUp = () => { drag.current.on = false; };
+    vp.addEventListener('wheel', onWheel, { passive: false });
+    vp.addEventListener('pointerdown', onDown);
+    vp.addEventListener('pointermove', onMove);
+    vp.addEventListener('pointerup', onUp);
+    vp.addEventListener('pointercancel', onUp);
+    window.addEventListener('resize', fitToScreen);
+    return () => {
+      vp.removeEventListener('wheel', onWheel);
+      vp.removeEventListener('pointerdown', onDown);
+      vp.removeEventListener('pointermove', onMove);
+      vp.removeEventListener('pointerup', onUp);
+      vp.removeEventListener('pointercancel', onUp);
+      window.removeEventListener('resize', fitToScreen);
+    };
+  }, [apply, fitToScreen]);
+  const zoomIn = useCallback(() => { st.current.zoom = Math.min(4, st.current.zoom * 1.25); apply(); }, [apply]);
+  const zoomOut = useCallback(() => { st.current.zoom = Math.max(0.15, st.current.zoom / 1.25); apply(); }, [apply]);
+  return { viewportRef, canvasRef, zoomDisplayRef, zoomIn, zoomOut, fitToScreen };
+}
+
+function MermaidDiagram({ onNodeClick }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    window.nodeClickHandler = onNodeClick;
+    mermaid.initialize({
+      startOnLoad: false, theme: 'dark', securityLevel: 'loose',
+      themeVariables: {
+        primaryColor: '#0a0a0a', primaryTextColor: '#ffffff', primaryBorderColor: '#2a2a2a',
+        lineColor: '#a0a0a0', background: '#000000',
+        secondaryColor: '#000000', tertiaryColor: '#000000',
+        mainBkg: '#0a0a0a', nodeBorder: '#2a2a2a',
+        clusterBkg: 'rgba(10,10,10,0.8)', clusterBorder: '#7c3aed',
+        titleColor: '#ffffff', edgeLabelBackground: 'transparent',
+      },
+      flowchart: { useMaxWidth: false, htmlLabels: true, curve: 'basis' },
+    });
+    mermaid.render('walkthrough-diagram', DIAGRAM).then(({ svg, bindFunctions }) => {
+      if (ref.current) { ref.current.innerHTML = svg; bindFunctions?.(ref.current); }
+    });
+    return () => { delete window.nodeClickHandler; };
+  }, [onNodeClick]);
+  return h('div', { ref, className: 'mermaid-wrap' });
+}
+
+function Summary({ collapsed, onToggle }) {
+  if (collapsed) {
+    return h('div', { onClick: onToggle,
+      className: 'fixed top-16 left-6 z-10 px-3 py-1.5 bg-wt-surface/60 backdrop-blur border border-wt-border rounded-full shadow-lg cursor-pointer hover:bg-wt-surface/80 transition-all duration-300' },
+      h('span', { className: 'text-xs text-wt-muted font-medium' }, 'Summary'));
+  }
+  return h('div', { onClick: onToggle,
+    className: 'fixed top-16 left-6 z-10 max-w-lg px-4 py-3 bg-wt-surface/80 backdrop-blur border border-wt-border rounded-lg shadow-lg cursor-pointer transition-all duration-300' },
+    h('p', { className: 'text-sm text-wt-muted leading-relaxed' }, SUMMARY),
+    h('p', { className: 'text-[0.65rem] text-wt-muted/50 mt-1.5' }, 'Click to dismiss'));
+}
+
+function DetailPanel({ nodeId, node, onClose }) {
+  useEffect(() => {
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    document.addEventListener('keydown', onKey);
+    return () => document.removeEventListener('keydown', onKey);
+  }, [onClose]);
+  const codeHtml = HIGHLIGHTED[nodeId];
+  return h('div', { className: 'fixed top-4 right-4 bottom-4 w-[560px] max-w-[calc(100vw-2rem)] z-30 bg-wt-surface border border-wt-border rounded-xl shadow-2xl flex flex-col overflow-hidden' },
+    h('button', { onClick: onClose,
+      className: 'absolute top-3 right-3 z-10 w-7 h-7 rounded-md border border-wt-border bg-wt-raised text-wt-muted flex items-center justify-center text-lg hover:bg-wt-red hover:border-wt-red hover:text-white transition-colors' }, '\u00d7'),
+    h('div', { className: 'flex-1 overflow-y-auto p-5' },
+      h('h2', { className: 'text-lg font-bold text-wt-fg mb-3 pr-9' }, node.title),
+      h('div', { className: 'dt-body' }, h('p', null, node.description)),
+      node.code && h('div', { className: 'dt-body' },
+        codeHtml ? h('div', { dangerouslySetInnerHTML: { __html: codeHtml } })
+                 : h('pre', { className: 'code-fallback' }, h('code', null, node.code))),
+      node.files?.length > 0 && h('div', { className: 'mt-4 pt-3 border-t border-wt-border' },
+        h('div', { className: 'text-[0.7rem] uppercase tracking-wider text-wt-muted font-semibold mb-1.5' }, 'Files'),
+        h('code', { className: 'text-sm text-wt-file font-mono leading-relaxed' },
+          node.files.map((f, i) => h('span', { key: i }, f, h('br')))))));
+}
+
+function ZoomControls({ zoomDisplayRef, onZoomIn, onZoomOut, onFit }) {
+  const btn = 'w-8 h-8 rounded-md border border-wt-border bg-wt-surface text-wt-muted hover:bg-wt-raised hover:text-wt-fg';
+  return h('div', { className: 'fixed bottom-5 left-5 z-20 flex items-center gap-1.5' },
+    h('button', { className: btn, onClick: onZoomOut }, '\u2212'),
+    h('span', { ref: zoomDisplayRef, className: 'text-xs text-wt-muted w-12 text-center' }, '100%'),
+    h('button', { className: btn, onClick: onZoomIn }, '+'),
+    h('button', { className: btn + ' w-auto px-2 text-xs', onClick: onFit }, 'Fit'));
+}
+
+function App() {
+  const [activeId, _setActiveId] = useState(null);
+  const [summaryCollapsed, setSummaryCollapsed] = useState(false);
+  const pz = usePanZoom();
+  const setActiveNode = useCallback((nodeId) => {
+    _setActiveId(nodeId);
+    document.querySelectorAll('.mermaid-wrap .node').forEach(n => { n.style.opacity = nodeId ? '0.4' : '1'; });
+    if (nodeId) {
+      const el = document.querySelector(`.mermaid-wrap .node[id*="${nodeId}"]`);
+      if (el) el.style.opacity = '1';
+    }
+  }, []);
+  const closeDetail = useCallback(() => {
+    _setActiveId(null);
+    document.querySelectorAll('.mermaid-wrap .node').forEach(n => { n.style.opacity = '1'; });
+  }, []);
+  useEffect(() => { setTimeout(pz.fitToScreen, 600); }, [pz.fitToScreen]);
+
+  return h(React.Fragment, null,
+    h('header', { className: 'fixed top-0 inset-x-0 z-10 px-6 py-3.5 bg-gradient-to-b from-wt-bg to-transparent pointer-events-none' },
+      h('h1', { className: 'text-base font-semibold text-wt-fg' }, 'Photo Scanner: Export Flow'),
+      h('p', { className: 'text-sm text-wt-muted mt-0.5' }, 'From the Export button in PhotoScanner.exe to verified files in the Immich library folder')),
+    h(Summary, { collapsed: summaryCollapsed, onToggle: () => setSummaryCollapsed(c => !c) }),
+    h('div', { ref: pz.viewportRef, className: 'w-full h-screen overflow-hidden cursor-grab active:cursor-grabbing' },
+      h('div', { ref: pz.canvasRef, className: 'origin-top-left will-change-transform inline-block p-[80px_60px_60px]' },
+        h(MermaidDiagram, { onNodeClick: setActiveNode }))),
+    h(ZoomControls, { zoomDisplayRef: pz.zoomDisplayRef, onZoomIn: pz.zoomIn, onZoomOut: pz.zoomOut, onFit: pz.fitToScreen }),
+    h('div', { className: 'fixed bottom-5 left-1/2 -translate-x-1/2 z-20 flex flex-wrap gap-4 px-4 py-2 bg-wt-surface border border-wt-border rounded-lg shadow-xl' },
+      LEGEND.map(l => h('span', { key: l.label, className: 'flex items-center gap-1.5 text-xs text-wt-muted' },
+        h('span', { className: `w-2 h-2 rounded-full ${l.color}` }), l.label))),
+    activeId && NODES[activeId] && h(DetailPanel, { nodeId: activeId, node: NODES[activeId], onClose: closeDetail }),
+    h('div', { className: 'fixed bottom-5 right-5 z-20 text-xs text-wt-muted opacity-50' }, 'Scroll zoom · Drag pan · Click nodes'));
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(h(App));
+</script>
+</body>
+</html>
