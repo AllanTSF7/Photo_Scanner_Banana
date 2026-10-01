@@ -146,20 +146,37 @@ that actually changed.
 
 **[implemented]** `banana.ingest.service.ingest_inbox`
 
-1. List files in `paths.inbox` (non-recursive).
+1. List files in `paths.inbox` (non-recursive). A file modified within `ingest.settle_seconds` (default 10) is
+   still being written: it is reported as `not_ready` and left for the next pass. Files the app placed itself
+   (a finished scan run, a recovery) are passed as `trusted` and skip the wait.
 2. **Pair** with `pairing.pattern` (case-insensitive), which must define a `base` group and an optional `suffix` group:
    - no suffix → `original` front, `_a` → `enhanced` front, `_b` → back
    - duplicate slots and non-matching names → `unmatched` (left in the inbox)
    - back without a front → `skipped` (left in the inbox)
-3. Create a batch `inbox-YYYYmmdd-HHMMSS`. **Move** each group's files to `archive/<batch>/`.
+3. Batch name `inbox-YYYYmmdd-HHMMSS` (made unique with `-2`, `-3`... when two ingests share a second).
+   **One photo per transaction [implemented]:** each group is analysed (steps 5-6 and OCR) while still in the
+   inbox, with only reads; then its files are moved to `archive/<batch>/` and its row committed at once. The
+   write lock is held for milliseconds per photo. If the commit fails, that photo's files are moved back to the
+   inbox, so the archive never holds a file without a row. A photo that can't be opened or decoded is reported
+   as `failed` and retried on later passes; after `ingest.unreadable_after` attempts (3) or
+   `ingest.unreadable_minutes` (10) it is moved to `inbox/_unreadable/` and listed in the System panel with
+   **Retry unreadable files** (`POST /api/ingest/retry-unreadable`).
 4. The front is chosen by `pairing.front_variant` (falling back to the other variant).
 5. dHash of the front (decoded to ≤512 px). Blank metrics of the back (≤1024 px):
    `back_type = blank if edge_density < analysis.blank_edge_density`; `keep_back = back_type != blank`.
 6. Rescan check: Hamming distance ≤ `analysis.dhash_max_distance` against **all** previously ingested scans
    (first match wins) → `duplicate_group_id`.
-7. A `source_key` that already exists → skipped (idempotent).
+7. **Reused names [implemented]:** `scan.source_sha256` is the sha256 of the source front. A `source_key`
+   that already exists (case-insensitive) with the **same** content → `skipped`, files moved to
+   `inbox/_already_ingested/`. Same name, **different** content (scanner software restarted its numbering) →
+   a new scan stored as `<base>~<hash8>`. Rows from before the column existed get their hash on first collision.
 
-**[planned]** Polling watcher with a file-size-stable check; NFS-safe (no inotify).
+**One ingest at a time [implemented]** (`banana/ingest/runner.py`, `IngestRunner`): a finished scan, the
+**Ingest inbox** button, scan recovery and the watcher all go through one lock; a second request waits instead
+of overlapping. **Inbox watcher [implemented]:** polls the inbox every `ingest.watch_seconds` (15) and ingests
+ready files (`ingest.watch_inbox`, default true; polling, so NFS-safe). `GET /api/ingest/status` reports the
+watcher, the last result, unreadable files and **archived files with no scan** (checked at startup; reported,
+never moved). The System panel shows these as the **Ingest** row (`warn` when something needs a person).
 
 ---
 

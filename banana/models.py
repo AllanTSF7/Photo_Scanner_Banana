@@ -34,6 +34,8 @@ class Scan(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     batch_id: int = Field(foreign_key="batch.id", index=True)
     source_key: str = Field(unique=True, index=True)  # scanner base name or original path
+    # sha256 of the source front file: tells a re-dropped photo from a new one that reuses an old name.
+    source_sha256: str | None = None
 
     front_path: str
     front_enhanced_path: str | None = None

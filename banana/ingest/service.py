@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import hashlib
+import logging
+import os
 import shutil
+import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
+from typing import Iterable
 
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 import numpy as np
@@ -22,13 +28,26 @@ from banana.ingest.pairing import pair_files
 from banana.models import Batch, Scan, ScanStatus
 
 
+log = logging.getLogger(__name__)
+
+UNREADABLE_DIR = "_unreadable"  # inside the inbox; ingest only reads top-level files, so it is never re-read
+ALREADY_INGESTED_DIR = "_already_ingested"
+
+
 @dataclass
 class IngestReport:
     batch: str | None = None
     created: list[int] = field(default_factory=list)
-    skipped: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)  # same name AND same content as an ingested scan
     unmatched: list[str] = field(default_factory=list)
     possible_duplicates: list[int] = field(default_factory=list)
+    not_ready: list[str] = field(default_factory=list)  # still being written: picked up next time
+    failed: list[dict] = field(default_factory=list)  # {"name", "error"}; left in the inbox, retried next time
+    unreadable: list[str] = field(default_factory=list)  # failed too often: moved to inbox/_unreadable/
+
+
+# Attempts per photo that failed to open/decode, kept for the life of the process: {base: (count, first_seen)}.
+_failures: dict[str, tuple[int, float]] = {}
 
 
 def _move(src: Path, dest_dir: Path) -> Path:
@@ -36,6 +55,26 @@ def _move(src: Path, dest_dir: Path) -> Path:
     dest = dest_dir / src.name
     shutil.move(src, dest)
     return dest
+
+
+def file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _group_files(group) -> list[Path]:
+    return [p for p in (group.original, group.enhanced, group.back) if p is not None]
+
+
+def _ready(path: Path, now: float, settle_seconds: float) -> bool:
+    """A file another program is still writing has a fresh modification time; leave it for the next pass."""
+    try:
+        return now - path.stat().st_mtime >= settle_seconds
+    except OSError:
+        return False
 
 
 def _unique_batch_name(session: Session, base: str) -> str:
@@ -47,56 +86,171 @@ def _unique_batch_name(session: Session, base: str) -> str:
     return name
 
 
-def ingest_inbox(session: Session, settings: Settings, batch_name: str | None = None) -> IngestReport:
+def ingest_inbox(
+    session: Session, settings: Settings, batch_name: str | None = None, *, trusted: Iterable[str] = (),
+) -> IngestReport:
+    """Ingest every ready photo in the inbox, one photo per transaction.
+
+    Each photo is analysed (crop, dHash, blank back, OCR) BEFORE anything is written, then its files are moved
+    to the archive and its row committed straight away. The SQLite write lock is held for milliseconds per
+    photo instead of for the whole batch (which made the operator's saves fail with "database is locked"),
+    and a crash can at most leave the one photo in flight. If the commit fails, its files go back to the inbox.
+
+    `trusted`: file names this app just placed itself (a finished scan run), exempt from the "still being
+    written" check. Anything else must be untouched for `ingest.settle_seconds` first.
+    """
     inbox = settings.paths.inbox
     files = [p for p in inbox.iterdir() if p.is_file()] if inbox.exists() else []
-    paired = pair_files(files, settings.pairing.pattern)
+    trusted = set(trusted)
+    now = time.time()
+    ready = [p for p in files if p.name in trusted or _ready(p, now, settings.ingest.settle_seconds)]
+    paired = pair_files(ready, settings.pairing.pattern)
     report = IngestReport(unmatched=[p.name for p in paired.unmatched])
+    report.not_ready = sorted(p.name for p in files if p not in ready)
     report.skipped += [g.base for g in paired.backs_without_front]
     if not paired.groups:
         return report
 
     name = _unique_batch_name(session, batch_name or f"inbox-{datetime.now():%Y%m%d-%H%M%S}")
-    batch = Batch(name=name)
-    session.add(batch)
-    session.flush()
-    report.batch = name
+    session.rollback()  # end the read transaction: nothing below should hold the database open between photos
+    batch: Batch | None = None
     archive = settings.paths.archive / name
 
     for group in paired.groups:
-        if session.exec(select(Scan).where(Scan.source_key == group.base)).first():
-            report.skipped.append(group.base)
+        try:
+            key, digest = _source_key(session, group, settings)
+            if key is None:
+                _move_aside(group, inbox / ALREADY_INGESTED_DIR)
+                report.skipped.append(group.base)
+                continue
+            scan = _analyzed_scan(session, group, key, digest, settings)
+        except (OSError, ValueError) as exc:  # can't open/decode: contained to this photo, retried next time
+            session.rollback()
+            _record_failure(group, exc, inbox, report, settings)
             continue
-        original = _move(group.original, archive) if group.original else None
-        enhanced = _move(group.enhanced, archive) if group.enhanced else None
-        back = _move(group.back, archive) if group.back else None
-        front = (enhanced or original) if settings.pairing.front_variant == "enhanced" else (original or enhanced)
+        session.rollback()  # analysis only read; drop that read transaction before writing
 
-        scan = Scan(
-            batch_id=batch.id,
-            source_key=group.base,
-            front_path=str(front),
-            front_enhanced_path=str(enhanced) if enhanced and enhanced != front else None,
-            back_path=str(back) if back else None,
-            status=ScanStatus.NEEDS_REVIEW.value,
-        )
-        session.add(scan)
-        session.flush()
-        corrections.suggest(
-            scan, "pairing", {"front": front.name, "back": back.name if back else None},
-            corrections.producers(settings)["pairing"],
-        )
-        analyze_scan(session, scan, settings)
+        moved: list[tuple[Path, Path]] = []
+        try:
+            for src in _group_files(group):
+                moved.append((src, _move(src, archive)))
+            new_paths = {src: dest for src, dest in moved}
+            scan.front_path = str(new_paths[Path(scan.front_path)])
+            if scan.front_enhanced_path:
+                scan.front_enhanced_path = str(new_paths[Path(scan.front_enhanced_path)])
+            if scan.back_path:
+                scan.back_path = str(new_paths[Path(scan.back_path)])
+            if batch is None:
+                batch = Batch(name=name)
+                session.add(batch)
+                session.flush()
+                report.batch = name
+            scan.batch_id = batch.id
+            session.add(scan)
+            session.commit()
+        except Exception:
+            session.rollback()
+            for src, dest in reversed(moved):  # never leave archived files without a row
+                if dest.exists() and not src.exists():
+                    shutil.move(dest, src)
+            if batch is not None and batch.id is not None and session.get(Batch, batch.id) is None:
+                batch = None  # the batch insert was rolled back with it
+            raise
+        _failures.pop(group.base.lower(), None)
         if scan.duplicate_group_id:
             report.possible_duplicates.append(scan.id)
         report.created.append(scan.id)
-
-    session.commit()
     return report
 
 
-def analyze_scan(session: Session, scan: Scan, settings: Settings, *, detect_crops: bool = True) -> Scan:
-    """Crop detection, dHash and blank-back check, all on the cropped + rotated photo. Keeps manual edits."""
+def _source_key(session: Session, group, settings: Settings) -> tuple[str | None, str]:
+    """The key a new scan is stored under, or None when this exact photo was already ingested.
+
+    Scanner software can restart its numbering (FastFoto_0001 again), so a name alone doesn't identify a
+    photo. Same name + same content: already ingested. Same name + different content: a new photo, stored
+    as `<name>~<hash8>`. A row from before content hashes were stored gets its hash filled in here.
+    """
+    front = group.front(settings.pairing.front_variant)
+    digest = file_sha256(front)
+    for candidate in (group.base, f"{group.base}~{digest[:8]}"):
+        existing = session.exec(select(Scan).where(func.lower(Scan.source_key) == candidate.lower())).first()
+        if existing is None:
+            return candidate, digest
+        known = existing.source_sha256
+        if known is None and Path(existing.front_path).exists():
+            known = file_sha256(Path(existing.front_path))
+            existing.source_sha256 = known
+            session.add(existing)
+            session.commit()
+        if known == digest:
+            return None, digest
+    return f"{group.base}~{digest[:16]}", digest
+
+
+def _analyzed_scan(session: Session, group, key: str, digest: str, settings: Settings) -> Scan:
+    """A fully analysed Scan for `group`, still pointing at the inbox files and not yet in the session."""
+    front = group.front(settings.pairing.front_variant)
+    scan = Scan(
+        batch_id=0,
+        source_key=key,
+        source_sha256=digest,
+        front_path=str(front),
+        front_enhanced_path=str(group.enhanced) if group.enhanced and group.enhanced != front else None,
+        back_path=str(group.back) if group.back else None,
+        status=ScanStatus.NEEDS_REVIEW.value,
+    )
+    corrections.suggest(
+        scan, "pairing", {"front": front.name, "back": group.back.name if group.back else None},
+        corrections.producers(settings)["pairing"],
+    )
+    analyze_scan(session, scan, settings, add=False)
+    return scan
+
+
+def _move_aside(group, folder: Path) -> None:
+    for src in _group_files(group):
+        dest = folder / src.name
+        if dest.exists():
+            dest = folder / f"{src.stem}-{int(time.time())}{src.suffix}"
+        folder.mkdir(parents=True, exist_ok=True)
+        shutil.move(src, dest)
+
+
+def _record_failure(group, exc: Exception, inbox: Path, report: IngestReport, settings: Settings) -> None:
+    count, first_seen = _failures.get(group.base.lower(), (0, time.time()))
+    count += 1
+    log.warning("ingest: %s could not be read (attempt %d): %s", group.base, count, exc)
+    gave_up = count >= settings.ingest.unreadable_after or time.time() - first_seen >= settings.ingest.unreadable_minutes * 60
+    if gave_up:
+        _move_aside(group, inbox / UNREADABLE_DIR)
+        _failures.pop(group.base.lower(), None)
+        report.unreadable.append(group.base)
+        log.warning("ingest: %s moved to %s after %d attempt(s)", group.base, UNREADABLE_DIR, count)
+    else:
+        _failures[group.base.lower()] = (count, first_seen)
+        report.failed.append({"name": group.base, "error": str(exc)})
+
+
+def archive_orphans(session: Session, settings: Settings) -> list[Path]:
+    """Files in the archive that no scan points at: left by an ingest that crashed before this version
+    committed per photo. Reported, never moved or deleted."""
+    archive = settings.paths.archive
+    if not archive.exists():
+        return []
+    known = set()
+    for row in session.exec(select(Scan.front_path, Scan.back_path, Scan.front_enhanced_path)):
+        known.update(os.path.normcase(os.path.abspath(p)) for p in row if p)
+    return sorted(
+        p for p in archive.rglob("*")
+        if p.is_file() and not p.name.startswith(".") and os.path.normcase(os.path.abspath(p)) not in known
+    )
+
+
+def analyze_scan(
+    session: Session, scan: Scan, settings: Settings, *, detect_crops: bool = True, add: bool = True,
+) -> Scan:
+    """Crop detection, dHash and blank-back check, all on the cropped + rotated photo. Keeps manual edits.
+    `add=False` only reads the database (ingest adds and commits the scan itself afterwards)."""
     front = Path(scan.front_path)
     back = Path(scan.back_path) if scan.back_path else None
     produced = corrections.producers(settings)
@@ -132,7 +286,8 @@ def analyze_scan(session: Session, scan: Scan, settings: Settings, *, detect_cro
     if settings.analysis.read_text and back and scan.back_type != "blank":
         read_back_text(scan, settings, known=known_entities(session, exclude_id=scan.id),
                        learned=dictionary.build(session))
-    session.add(scan)
+    if add:
+        session.add(scan)
     return scan
 
 

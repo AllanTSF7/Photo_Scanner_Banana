@@ -17,7 +17,9 @@ def make_engine(db_path: Path) -> Engine:
     def _pragmas(dbapi_conn, _record) -> None:  # API and worker share the file
         cur = dbapi_conn.cursor()
         cur.execute("PRAGMA journal_mode=WAL")
-        cur.execute("PRAGMA busy_timeout=5000")
+        # A safety net, not the fix: ingest now holds the write lock for milliseconds per photo. 5 s was too
+        # short while it held it for a whole batch (20 "database is locked" saves on 2026-09-30).
+        cur.execute("PRAGMA busy_timeout=30000")
         cur.execute("PRAGMA foreign_keys=ON")
         cur.close()
 

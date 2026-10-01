@@ -22,6 +22,7 @@ def client(tmp_path, monkeypatch):
         "[paths]\n" + "".join(f'{n} = "{(tmp_path / n).as_posix()}"\n' for n in ("inbox", "archive", "sorted")) +
         f'data_dir = "{(tmp_path / "data").as_posix()}"\n'
         "[analysis]\nread_text = false\n"  # OCR has its own tests; keeps these fast
+        "[ingest]\nsettle_seconds = 0\nwatch_inbox = false\n"  # demo files are brand new; no background ingests
         '[auth]\nallowed_hosts = ["testserver"]\n',
         encoding="utf-8",
     )

@@ -13,6 +13,14 @@ from pydantic import BaseModel
 DEFAULT_PAIRING_PATTERN = r"^(?P<base>.+_\d{4})(?P<suffix>_a|_b)?\.(?:jpe?g|tiff?)$"
 
 
+class IngestConfig(BaseModel):
+    watch_inbox: bool = True  # pick up files other software drops into the inbox, without clicking Ingest
+    watch_seconds: int = 15
+    settle_seconds: float = 10  # a file modified more recently than this is still being written: wait for it
+    unreadable_after: int = 3  # failed attempts before a photo is moved to inbox/_unreadable/
+    unreadable_minutes: float = 10  # ...or this long since its first failure, whichever comes first
+
+
 class PathsConfig(BaseModel):
     inbox: Path = Path("/mnt/photo_vault/inbox")
     archive: Path = Path("/mnt/photo_vault/archive")
@@ -105,6 +113,7 @@ class Settings(BaseModel):
     auth: AuthConfig = AuthConfig()
     paths: PathsConfig = PathsConfig()
     pairing: PairingConfig = PairingConfig()
+    ingest: IngestConfig = IngestConfig()
     analysis: AnalysisConfig = AnalysisConfig()
     dates: DatesConfig = DatesConfig()
     scanner: ScannerConfig = ScannerConfig()

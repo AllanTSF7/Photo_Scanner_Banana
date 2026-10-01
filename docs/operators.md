@@ -75,8 +75,8 @@ and dropped later, so duplex is always on.
 Each photo becomes one front and one back (duplex). A message about an "odd page count" means the last photo
 has no back image. Check that photo.
 
-**Using files instead:** put scan files in the inbox folder, wait until they're completely saved, then click
-**Ingest inbox** (see [diagnostics](diagnostics&bugs.md#ingest-grabbed-a-scan-that-was-still-being-saved)).
+**Using files instead:** put scan files in the inbox folder. The app checks the inbox every 15 seconds and adds
+new photos to the review queue by itself once they've finished saving; **Ingest inbox** does it right away.
 The file names must follow `<name>_0001.jpg` / `<name>_0001_b.jpg`; don't rename them.
 
 ### Step 2: Check the ingest message
@@ -270,6 +270,7 @@ A `/` inside a name is changed to `-`, because `/` separates tag levels.
 
 **Do**
 - Finish scanning a stack before you ingest it.
+- If a bar appears under the header about a scan, read it: **Recover scans** brings kept pages into the queue.
 - Reject bad scans instead of deleting files.
 - Add at least a decade to undated photos.
 

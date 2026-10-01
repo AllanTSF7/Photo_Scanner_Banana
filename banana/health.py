@@ -97,12 +97,17 @@ def run_checks(settings: Settings, engine: Engine) -> list[dict]:
     if not cfg.host and not cfg.sane_device:
         checks.append(_check("sane", "SANE", OFF, "no scanner configured"))
         checks.append(_check("scanner", "Scanner", OFF, "not configured (scanner.host)"))
+    elif cfg.effective_backend == "twain":
+        # Windows scans through Epson's TWAIN driver: a missing scanimage is expected, not a failure. Reporting
+        # it as one kept the System light red on every Windows install, which hides the problems that matter.
+        checks.append(_check("sane", "SANE", OFF, "not used: scanning goes through Epson's TWAIN driver"))
     else:
         scanimage = shutil.which(cfg.scanimage)
         checks.append(
             _check("sane", "SANE", OK, scanimage)
             if scanimage else _check("sane", "SANE", FAIL, f"'{cfg.scanimage}' not found: install sane-utils")
         )
+    if cfg.host or cfg.sane_device:
         online = sane.is_online(cfg)
         checks.append(
             _check("scanner", "Scanner", OK if online else FAIL,
@@ -130,6 +135,23 @@ def _immich_check(settings: Settings, engine: Engine) -> dict:
         return _check("immich", "Immich", FAIL, f"unreachable: {cfg.url} ({exc})")
     finally:
         client.close()
+
+
+def ingest_check(status: dict) -> dict:
+    """Inbox watcher state, and anything ingest set aside that a person needs to look at."""
+    problems = []
+    if status["unreadable"]:
+        problems.append(f"{len(status['unreadable'])} file(s) set aside as unreadable in inbox/_unreadable")
+    if status["orphans"]:
+        problems.append(f"{status['orphans']} archived file(s) have no scan (an older ingest stopped partway)")
+    if status["last_error"]:
+        problems.append(f"last ingest failed: {status['last_error']}")
+    if problems:
+        return _check("ingest", "Ingest", WARN, "; ".join(problems))
+    if status["watching"]:
+        last = f", last pick-up {status['last_run'][11:16]}" if status["last_run"] else ""
+        return _check("ingest", "Ingest", OK, f"watching the inbox every {status['watch_seconds']} s{last}")
+    return _check("ingest", "Ingest", OFF, "inbox watcher off (ingest.watch_inbox): use Ingest inbox")
 
 
 def overall(checks: list[dict]) -> str:

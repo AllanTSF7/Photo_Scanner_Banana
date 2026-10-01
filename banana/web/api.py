@@ -31,10 +31,11 @@ from banana.analysis import ocr
 from banana.analysis import entities
 from banana.core import corrections, dictionary, proposals
 from banana.ingest.service import (
-    analyze_scan, extract_for_scan, ingest_inbox, known_entities, read_back_text, record_entity_suggestions,
+    analyze_scan, extract_for_scan, known_entities, read_back_text, record_entity_suggestions,
     release_from_duplicate_group,
 )
 from banana.immich import settings as immich_settings
+from banana.ingest.runner import IngestRunner
 from banana.immich.client import build_client
 from banana.immich.dedup import ImmichCheckController
 from banana.models import Batch, CorrectionEvent, Export, Scan, ScanStatus, SettingOverride, utcnow
@@ -53,6 +54,7 @@ app = FastAPI(
 )
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
 scans = sane.ScanController(settings.scanner, settings.paths.inbox)
+ingests = IngestRunner(engine, settings)  # every ingest goes through this: one at a time, never overlapping
 immich_check = ImmichCheckController(engine, settings)
 
 # Every request goes through one gate (banana/auth.py has the account and session logic):
@@ -261,8 +263,8 @@ def scanner_status() -> dict:
 
 
 def _ingest_after_scan() -> dict:
-    with db.session(engine) as session:
-        return ingest_inbox(session, settings).__dict__
+    # The run's own files were just placed by this app: no need to wait for them to settle.
+    return ingests.run(reason="scan", trusted=scans.status()["files"])
 
 
 @app.post("/api/scanner/recover", tags=["scanner"])
@@ -273,22 +275,28 @@ def recover_scans() -> dict:
     except RuntimeError as exc:
         raise HTTPException(409, str(exc)) from exc
     if result["recovered"]:
-        result["ingest"] = _ingest_after_scan()
+        runs = tuple(f"{r['run']}_" for r in result["recovered"])
+        placed = [p.name for p in settings.paths.inbox.iterdir() if p.is_file() and p.name.startswith(runs)]
+        result["ingest"] = ingests.run(reason="recover", trusted=placed)
     return result
 
 
-def _recover_at_startup() -> None:
-    """A run cut off by a crash or a closed app leaves its pages in a hidden staging folder: finish those
-    on launch so they reach the review queue without anyone having to know the folder exists."""
+def _on_startup() -> None:
+    """Background start-up work, in order: finish scan runs cut off by a crash or a closed app (their pages
+    sit in a hidden staging folder), report archived files with no scan, then start watching the inbox."""
     try:
-        if scans.stranded():
+        if settings.scanner.recover_on_start and scans.stranded():
             recover_scans()
     except Exception:  # noqa: BLE001 - never stop the app from starting; the banner still offers Recover
         logging.getLogger("banana.scanner").exception("recovering stranded scans at startup failed")
+    try:
+        ingests.check_orphans()
+    except Exception:  # noqa: BLE001
+        logging.getLogger("banana.ingest").exception("checking the archive for files with no scan failed")
+    ingests.start_watching()
 
 
-if settings.scanner.recover_on_start:
-    threading.Thread(target=_recover_at_startup, daemon=True, name="recover-scans").start()
+threading.Thread(target=_on_startup, daemon=True, name="startup").start()
 
 
 class ScanRequest(BaseModel):
@@ -328,6 +336,7 @@ def download_windows_build() -> FileResponse:
 def component_health() -> dict:
     """Health of each component: API, database, ExifTool, C++ core, folders, SANE, scanner, Immich."""
     checks = health_checks.run_checks(settings, engine)
+    checks.insert(len(checks) - 1, health_checks.ingest_check(ingests.status()))  # before Immich
     return {"overall": health_checks.overall(checks), "checks": checks}
 
 
@@ -713,10 +722,23 @@ def parse_date(text: str) -> list[dict]:
 
 
 @app.post("/api/ingest", tags=["pipeline"])
-def ingest(session: Session = Depends(get_session)) -> dict:
-    """Pair files in the inbox, move them to the archive, flag blank backs and possible rescans."""
-    report = ingest_inbox(session, settings)
-    return report.__dict__
+def ingest() -> dict:
+    """Pair files in the inbox, move them to the archive, flag blank backs and possible rescans.
+    Waits for an ingest already running (a scan's, or the inbox watcher's) instead of overlapping it."""
+    return ingests.run(reason="button")
+
+
+@app.get("/api/ingest/status", tags=["pipeline"])
+def ingest_status() -> dict:
+    """Inbox watcher, the last ingest's result, photos moved aside as unreadable, archived files with no scan."""
+    return ingests.status()
+
+
+@app.post("/api/ingest/retry-unreadable", tags=["pipeline"])
+def retry_unreadable() -> dict:
+    """Move every file from inbox/_unreadable back into the inbox and ingest again."""
+    moved = ingests.retry_unreadable()
+    return {"moved": moved, "ingest": ingests.run(reason="retry", trusted=()) if moved else None}
 
 
 @app.post("/api/export", tags=["pipeline"])

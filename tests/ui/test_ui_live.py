@@ -89,7 +89,8 @@ def server(tmp_path, read_text):
         # backend = "sane" always: on Windows "auto" means Epson's real TWAIN driver, and a test must never drive
         # real hardware (it did before this was pinned - "No photos in the feeder" came from the real scanner).
         + f'[scanner]\nhost = "127.0.0.1"\nport = {fake_port.port}\nbackend = "sane"\nscanimage = "{scanimage.as_posix()}"\n'
-        + f"[analysis]\nread_text = {'true' if read_text else 'false'}\n",
+        + f"[analysis]\nread_text = {'true' if read_text else 'false'}\n"
+        + "[ingest]\nsettle_seconds = 0\nwatch_inbox = false\n",
         encoding="utf-8",
     )
     from banana import auth, db
@@ -494,7 +495,7 @@ def test_system_health_indicator_and_panel(page):
     panel = page.locator("#health-panel")
     expect(panel).to_be_visible()
     expect(button).to_have_attribute("aria-expanded", "true")
-    names = ["api", "database", "exiftool", "native", "inbox", "archive", "library", "data", "ocr", "entities", "sane", "scanner", "immich"]
+    names = ["api", "database", "exiftool", "native", "inbox", "archive", "library", "data", "ocr", "entities", "sane", "scanner", "ingest", "immich"]
     expect(panel.locator("li")).to_have_count(len(names))
     for name in ("api", "database", "inbox", "archive", "library", "data", "sane", "scanner"):
         expect(panel.locator(f'li[data-name="{name}"]')).to_have_attribute("data-status", "ok")
@@ -1376,3 +1377,39 @@ def test_scan_alert_dismiss_button_at_400px_and_comes_back_when_something_change
     expect(pg.locator("#scan-alert")).to_be_visible()  # a new problem shows again
     expect(pg.locator("#scan-alert")).to_contain_text("2 scan runs stopped")
     context.close()
+
+
+def test_retry_unreadable_button_at_400px(browser, server):
+    """Photos ingest gave up on sit in inbox/_unreadable; the System panel lists them with a Retry button."""
+    import make_demo_inbox as demo
+
+    folder = server["root"] / "inbox" / "_unreadable"
+    folder.mkdir()
+    demo.front(5).save(folder / "Box_0009.jpg", quality=90)  # readable now (e.g. it was still copying before)
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    pg.click("#btn-health")
+    box = pg.locator("#ingest-unreadable")
+    expect(box).to_be_visible()
+    expect(box).to_contain_text("Box_0009.jpg")
+    expect(pg.locator('#health-list li[data-name="ingest"]')).to_have_attribute("data-status", "warn")
+    assert no_horizontal_scroll(pg)
+
+    retry = pg.locator("#btn-retry-unreadable")
+    expect(retry).to_be_enabled()
+    retry.click()
+    expect(toast(pg)).to_contain_text("Ingested")
+    expect(box).to_be_hidden()
+    context.close()
+
+
+def test_ingest_button_reports_files_set_aside(page, server):
+    ingest(page)
+    demo_front = server["root"] / "archive"
+    first = next(demo_front.rglob("Attic3_0001.jpg"))
+    import shutil as _sh
+
+    _sh.copy(first, server["root"] / "inbox" / "Attic3_0001.jpg")  # the very same photo dropped again
+    page.click("#btn-ingest")
+    expect(toast(page)).to_contain_text("Already ingested, set aside: Attic3_0001")

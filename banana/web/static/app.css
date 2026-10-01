@@ -169,6 +169,11 @@ input[data-state="suggested"], textarea[data-state="suggested"] { border-style: 
 .scan-alert-text { flex: 1 1 18rem; margin: 0; color: var(--text-primary); }
 .scan-alert-text strong { font-weight: 600; }
 .scan-alert-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+.ingest-unreadable {
+  display: flex; align-items: center; gap: var(--space-3); flex-wrap: wrap;
+  margin-top: var(--space-3); padding-top: var(--space-3); border-top: var(--border-w) solid var(--border-subtle);
+}
+.ingest-unreadable p { flex: 1 1 18rem; margin: 0; overflow-wrap: anywhere; }
 
 /* ---------- drawers ---------- */
 .drawer { padding: var(--space-4) var(--space-4) 0; }

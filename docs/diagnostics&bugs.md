@@ -208,8 +208,19 @@ Created during export and normally removed. It can remain if the server was kill
 Make sure Immich excludes `**/.staging/**`.
 
 ### Re-scanning a photo with the same file name
-Ingest skips base names it has already seen, so a rescan saved as `Attic3_0001` stays in the inbox.
-Rename the new files with another prefix or number (for example `Attic3r_0001`), then ingest.
+Ingest compares content, not just names. The very same file dropped again is moved to `inbox/_already_ingested/`
+and the message says "Already ingested, set aside". A different photo that reuses an old name (the scanner
+software restarted its numbering) is ingested normally; its key gets a short suffix (`Attic3_0001~1a2b3c4d`).
+
+### Files in `inbox/_unreadable`
+Ingest tried a photo 3 times (or for 10 minutes) and couldn't open it: usually a file still being copied, or a
+broken file. The System panel lists them. **Retry unreadable files** puts them back in the inbox and ingests
+again. A file that keeps failing is damaged: rescan the photo.
+
+### System panel: "archived file(s) have no scan"
+An ingest from an older version stopped partway and left files in `archive/` that the app doesn't know about.
+Nothing is lost and nothing is moved. To bring them in, copy them (keeping the names) into the inbox; ingest
+recognizes any it already has.
 
 ### "Delete permanently" isn't there, or refuses
 The button only appears once a scan is **Rejected** (never during normal review - open the Rejected tab and
@@ -258,7 +269,7 @@ Don't edit the database while the server is running unless you know what you're 
 | ID | Summary | Severity | Status |
 |---|---|---|---|
 | B-1 | dHash flags similar-looking photos as rescans | low | open, fixed by the planned DINOv3 step |
-| B-2 | Ingest can grab a scan that is still being saved | medium | open |
+| B-2 | Ingest can grab a scan that is still being saved | medium | fixed: files modified within `ingest.settle_seconds` wait for the next pass; a photo that won't decode is contained, retried, then moved to `inbox/_unreadable/`; `test_files_still_being_written_wait_for_the_next_pass`, `test_an_unreadable_photo_is_contained_retried_then_moved_aside` |
 | B-3 | No authentication on the web page or API | high (if exposed) | open |
 | B-4 | Export runs inside the web request | low (large batches) | open |
 | B-5 | Re-export after a date change makes Immich see a new asset | medium | open, by design until the Immich integration |
@@ -286,6 +297,11 @@ Don't edit the database while the server is running unless you know what you're 
 | B-27 | 12 TWAIN scan runs (2026-09-30) were reported as failed and their pages left in hidden `inbox/.scanning-*` folders | high | fixed: the driver raised after the last page arrived, before its BMP was converted; `acquire_pages` now converts leftovers and raises `ScanInterrupted`, the run places and ingests every page and shows a warning, the cause is logged, a bar under the header stays until dismissed, and **Recover scans** / launch finish older runs; `test_interrupted_run_still_reaches_the_inbox_with_a_visible_warning`, `test_recover_finishes_stranded_runs_into_the_inbox`, `test_scan_alert_recover_button_at_400px` |
 | B-28 | Two ingests in the same second failed with `UNIQUE constraint failed: batch.name` after moving files | medium | fixed: `_unique_batch_name` appends -2, -3…; found by `test_stranded_scan_runs_are_reported_and_recovered_into_review` |
 | B-29 | On Windows the live UI tests drove the real Epson scanner through TWAIN | medium | fixed: the test server pins `scanner.backend = "sane"` (the fake `scanimage`); tests that need it skip on Windows |
+| B-30 | Saves failed with "database is locked" while a scan's ingest ran (20 errors on 2026-09-30) | high | fixed: ingest commits one photo at a time and analyses before writing; busy timeout 30 s as a safety net; `test_other_writes_succeed_while_an_ingest_is_analysing` |
+| B-31 | A crash mid-ingest left files in `archive/` with no scan, and re-ingest couldn't find them | high | fixed: per-photo commit, files moved back if the commit fails; startup reports any archived file with no scan; `test_a_failed_commit_puts_that_photos_files_back_and_keeps_the_ones_before` |
+| B-32 | A scan's own ingest and the Ingest inbox button could run at once over the same files | medium | fixed: `IngestRunner` lock; `test_concurrent_ingests_queue_instead_of_colliding` |
+| B-33 | A new photo whose name was used before (scanner restarted its numbering) was skipped on every ingest | high | fixed: content hash decides; same name + new content is stored as `<base>~<hash8>`; `test_same_name_same_photo_is_set_aside_but_a_reused_name_is_a_new_photo` |
+| B-34 | The System light was red on every Windows install because SANE's `scanimage` isn't there | medium | fixed: with the TWAIN backend the SANE row is `off`, "not used" |
 
 #### B-6 Scan interrupted by a server restart
 Scans run inside the server process. Restarting it (deploy, crash, or the live dev server reloading after a
@@ -306,10 +322,9 @@ Seen in testing: demo scan #5 was flagged against an unrelated photo.
 **Fix:** DINOv3 similarity confirms or clears the match.
 
 #### Ingest grabbed a scan that was still being saved
-**B-2. Symptom:** a photo with a broken or partial image, or a front whose back arrives later and is ignored.
-**Cause:** ingest takes whatever is in the inbox. The planned "file size stable" check isn't implemented.
-**Workaround:** click **Ingest inbox** only after the Epson software finishes the whole stack.
-A back left behind in the inbox can't currently be attached to its already-ingested front; move it aside and report it.
+**B-2. Fixed.** Files modified in the last `ingest.settle_seconds` (10) wait for the next pass, and a photo that
+won't open is retried and then set aside in `inbox/_unreadable/` instead of stopping the batch.
+Still true: a back that arrives after its front was ingested can't be attached to it; move it aside and report it.
 
 #### B-3 No authentication
 Anyone who can reach port 8000 can edit and export. **Only run it on a trusted LAN, or bound to `127.0.0.1`**

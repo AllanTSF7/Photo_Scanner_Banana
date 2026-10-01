@@ -841,13 +841,52 @@ async function deleteScan() {
 $("btn-delete").onclick = () => withButton($("btn-delete"), deleteScan);
 
 // ---------- pipeline ----------
-$("btn-ingest").onclick = () => withButton($("btn-ingest"), async () => {
-  const r = await api("POST", "/api/ingest");
+function ingestLines(r) {
   const lines = [r.created.length ? `Ingested ${r.created.length} scan(s) into ${r.batch}` : "Inbox has no new scans"];
   if (r.possible_duplicates.length) lines.push(`${r.possible_duplicates.length} possible rescan(s) flagged`);
   if (r.unmatched.length) lines.push(`Ignored: ${r.unmatched.join(", ")}`);
-  toast(lines.join("\n"));
+  if (r.skipped?.length) lines.push(`Already ingested, set aside: ${r.skipped.join(", ")}`);
+  if (r.not_ready?.length) lines.push(`${r.not_ready.length} file(s) still being written; picked up shortly`);
+  if (r.failed?.length) lines.push(`Could not read: ${r.failed.map((f) => f.name).join(", ")} (will retry)`);
+  if (r.unreadable?.length) lines.push(`Set aside as unreadable: ${r.unreadable.join(", ")} (see System)`);
+  return lines;
+}
+
+$("btn-ingest").onclick = () => withButton($("btn-ingest"), async () => {
+  const r = await api("POST", "/api/ingest");
+  toast(ingestLines(r).join("\n"), (r.failed?.length || r.unreadable?.length) > 0);
+  ingestRuns = null; // our own ingest; don't announce it again from the status poll
   await selectTab("needs_review");
+});
+
+// The inbox watcher ingests files other software drops in. Poll its status so new scans show up, the Ingest
+// button says when an ingest is already running, and photos set aside as unreadable can be retried.
+let ingestRuns = null;
+async function loadIngestStatus() {
+  let s;
+  try { s = await api("GET", "/api/ingest/status"); } catch { return; }
+  const button = $("btn-ingest");
+  if (!button.classList.contains("busy")) {
+    button.disabled = s.running;
+    button.textContent = s.running ? "Ingest running" : "Ingest inbox";
+  }
+  $("ingest-unreadable").hidden = !s.unreadable.length;
+  $("ingest-unreadable-text").textContent = s.unreadable.length
+    ? `${s.unreadable.length} file(s) could not be read and were set aside in inbox/_unreadable: ${s.unreadable.join(", ")}`
+    : "";
+  if (ingestRuns !== null && s.runs > ingestRuns && s.last_result?.created?.length) {
+    toast(`${s.last_result.created.length} new scan(s) added from the inbox`);
+    await refresh();
+  }
+  ingestRuns = s.runs;
+}
+
+$("btn-retry-unreadable").onclick = () => withButton($("btn-retry-unreadable"), async () => {
+  const r = await api("POST", "/api/ingest/retry-unreadable");
+  toast(r.ingest ? ingestLines(r.ingest).join("\n") : "Nothing to retry", !!(r.ingest?.unreadable?.length));
+  ingestRuns = null;
+  await loadIngestStatus();
+  await refresh();
 });
 
 $("btn-export").onclick = () => withButton($("btn-export"), async () => {
@@ -1008,7 +1047,7 @@ $("btn-scan").onclick = () => withButton($("btn-scan"), async () => {
 });
 
 // ---------- system health ----------
-let lastHealthRows = 13;
+let lastHealthRows = 14;
 
 async function loadHealth() {
   const button = $("btn-health");
@@ -1373,5 +1412,7 @@ loadHealth();
 setInterval(loadHealth, 30000);
 loadScannerStatus();
 setInterval(loadScannerStatus, 30000);
+loadIngestStatus();
+setInterval(loadIngestStatus, 15000);
 loadLearningCount();
 selectTab(state.status);
