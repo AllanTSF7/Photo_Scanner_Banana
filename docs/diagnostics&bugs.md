@@ -302,6 +302,7 @@ Don't edit the database while the server is running unless you know what you're 
 | B-32 | A scan's own ingest and the Ingest inbox button could run at once over the same files | medium | fixed: `IngestRunner` lock; `test_concurrent_ingests_queue_instead_of_colliding` |
 | B-33 | A new photo whose name was used before (scanner restarted its numbering) was skipped on every ingest | high | fixed: content hash decides; same name + new content is stored as `<base>~<hash8>`; `test_same_name_same_photo_is_set_aside_but_a_reused_name_is_a_new_photo` |
 | B-34 | The System light was red on every Windows install because SANE's `scanimage` isn't there | medium | fixed: with the TWAIN backend the SANE row is `off`, "not used" |
+| B-35 | Deleting a rejected scan removed its originals before the record; a failed commit left a row pointing at deleted files | medium | fixed: commit first, then unlink; `test_delete_keeps_the_originals_when_the_record_cannot_be_removed` |
 
 #### B-6 Scan interrupted by a server restart
 Scans run inside the server process. Restarting it (deploy, crash, or the live dev server reloading after a

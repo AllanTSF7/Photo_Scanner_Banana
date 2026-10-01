@@ -581,3 +581,26 @@ def test_stranded_scan_runs_are_reported_and_recovered_into_review(client):
     assert len(r["ingest"]["created"]) == 2  # two photos, front + back each
     assert not folder.exists()
     assert c.get("/api/scanner").json()["stranded"] == []
+
+
+def test_delete_keeps_the_originals_when_the_record_cannot_be_removed(client, monkeypatch):
+    """Files used to be unlinked before the commit; a busy database then left a row pointing at deleted originals."""
+    import sqlite3
+
+    from sqlmodel import Session
+
+    c, _ = client
+    c.post("/api/ingest")
+    scan = next(s for s in c.get("/api/scans").json() if s["source_key"] == "Attic3_0002")
+    c.patch(f"/api/scans/{scan['id']}", json={"status": "rejected"})
+
+    def busy(self):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Session, "commit", busy)
+    with pytest.raises(sqlite3.OperationalError):
+        c.delete(f"/api/scans/{scan['id']}")
+    monkeypatch.undo()
+
+    assert Path(scan["front_path"]).exists() and Path(scan["back_path"]).exists()
+    assert c.get(f"/api/scans/{scan['id']}").status_code == 200

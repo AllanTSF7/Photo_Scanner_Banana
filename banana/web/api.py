@@ -518,18 +518,22 @@ def delete_scan(scan_id: int, session: Session = Depends(get_session)) -> dict:
         raise HTTPException(409, "this scan has correction history used for training and can't be deleted")
 
     release_from_duplicate_group(session, scan)  # never leave another scan's "possible rescan of #N" dangling
-    removed = []
-    for value in {scan.front_path, scan.back_path, scan.front_enhanced_path}:
-        if not value:
-            continue
-        try:
-            Path(value).unlink()
-            removed.append(Path(value).name)
-        except FileNotFoundError:
-            pass
+    paths = [Path(v) for v in {scan.front_path, scan.back_path, scan.front_enhanced_path} if v]
+    # The record goes first: if the commit fails (e.g. the database is busy) the originals are still there and
+    # the scan is unchanged. Deleting files first left a row pointing at originals that were already gone.
     session.delete(scan)
     session.commit()
-    return {"deleted": scan_id, "files_removed": removed}
+    removed, kept = [], []
+    for path in paths:
+        try:
+            path.unlink()
+            removed.append(path.name)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:  # e.g. open in another program: the record is gone, say which file stayed
+            logging.getLogger("banana.web").warning("deleted scan %s but could not remove %s: %s", scan_id, path, exc)
+            kept.append(str(path))
+    return {"deleted": scan_id, "files_removed": removed, "files_kept": kept}
 
 
 class OcrLineUpdate(BaseModel):

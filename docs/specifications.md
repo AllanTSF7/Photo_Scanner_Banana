@@ -90,7 +90,8 @@ originals stay in `archive/<batch>/` exactly like every other status, and the bu
 once a scan is already `rejected`, never during normal review. Deletion is refused (409) unless **all** of: the
 scan is `rejected`, it has no `export` row, and it has no `correction_event` rows (i.e. it was never approved,
 even briefly, before being rejected - that history is training data and is never discarded). On success, the
-front/back/enhanced files are unlinked and the `scan` row is removed.
+`scan` row is removed and committed **first**, then the front/back/enhanced files are unlinked; a file that
+can't be removed is listed in `files_kept`. If the commit fails, nothing on disk has changed.
 
 `duplicate_group_id` isn't a real foreign key (`banana/models.py`), so before removal
 `release_from_duplicate_group` (`banana/ingest/service.py`) re-points any other scan that named this one as
