@@ -24,6 +24,8 @@ const state = {
   dirty: false,
   current: null, // last scan object shown in the editor
   edited: new Set(), // fields the operator changed on the current scan (date, description, chip fields, ocr)
+  version: null, // the current scan's version as loaded: sent with every save so a conflicting one is caught
+  base: {}, // each form field's value as loaded; a save sends only the fields that differ from it
 };
 const $ = (id) => document.getElementById(id);
 
@@ -40,7 +42,8 @@ async function api(method, url, body) {
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail ?? detail; } catch { /* not JSON */ }
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const message = typeof detail === "string" ? detail : detail?.message ?? JSON.stringify(detail);
+    throw Object.assign(new Error(message), { status: res.status, detail });
   }
   return res.json();
 }
@@ -401,6 +404,8 @@ function showEditor(scan, { full = false } = {}) {
   if (!refreshing) state.edited = new Set();
   state.selectedId = scan.id;
   state.current = scan;
+  state.version = scan.version;
+  if (!refreshing) state.base = {};
   const committed = isCommitted(scan);
   const sug = scan.suggestions || {};
   document.querySelectorAll("#scan-list li").forEach((li) => li.classList.toggle("selected", +li.dataset.id === scan.id));
@@ -453,6 +458,7 @@ function showEditor(scan, { full = false } = {}) {
   $("back-rotation").hidden = !(sug.rotation_back && sug.rotation_back.value);
   setSuggested($("back-rotation"), !committed && sug.rotation_back && sug.rotation_back.value === scan.back_rotation);
   $("keep-back").checked = scan.keep_back;
+  state.base.keep_back = scan.keep_back;
   $("keep-back").disabled = !scan.has_back;
   $("fig-back").classList.toggle("dropped", scan.has_back && !scan.keep_back);
 
@@ -460,16 +466,19 @@ function showEditor(scan, { full = false } = {}) {
   const d = scan.date;
   if (!refreshing || !fieldBusy($("date-text"), "date")) {
     $("date-text").value = d.precision === "unknown" ? "" : d.label;
+    state.base.date_text = $("date-text").value;
     renderDatePreview(d.precision === "unknown" ? null : [d]);
     setSuggested($("date-text"), !committed && !!sug.date && sug.date.value === (d.precision === "unknown" ? null : d.label));
   }
   if (!refreshing || !fieldBusy($("description"), "description")) {
     $("description").value = scan.description || "";
+    state.base.description = $("description").value;
     setSuggested($("description"), !committed && !!sug.description && sug.description.value === (scan.description || ""));
   }
   for (const f of CHIP_FIELDS) {
     if (refreshing && chips[f].busy()) continue;
     chips[f].set(scan[f], sug[f]?.value || [], committed);
+    state.base[f] = [...(scan[f] || [])];
   }
   if (!(refreshing && $("ocr-lines").contains(document.activeElement))) renderOcr(scan);
   if (!refreshing) {
@@ -571,20 +580,78 @@ $("keep-back").addEventListener("change", () => {
   markDirty();
 });
 
+function formValues() {
+  const values = { date_text: $("date-text").value, description: $("description").value, keep_back: $("keep-back").checked };
+  for (const f of CHIP_FIELDS) values[f] = chips[f].get();
+  return values;
+}
+
+/** Only what the operator changed since the scan was loaded (plus `extra`), and the version it was loaded at:
+    two people editing different fields no longer wipe each other's work, and a real conflict is caught. */
 function formBody(extra = {}) {
-  const body = {
-    date_text: $("date-text").value,
-    description: $("description").value,
-    keep_back: $("keep-back").checked,
-    ...extra,
-  };
-  for (const f of CHIP_FIELDS) body[f] = chips[f].get();
-  return body;
+  const body = {};
+  for (const [field, value] of Object.entries(formValues())) {
+    if (!(field in state.base) || !sameValue(value, state.base[field])) body[field] = value;
+  }
+  return { ...body, ...extra, version: state.version };
+}
+
+const FORM_FIELD_LABELS = { date_text: "Date", description: "Description", keep_back: "Keep back", people: "People", places: "Places", events: "Events", tags: "Tags" };
+function savedValue(scan, field) {
+  if (field === "date_text") return scan.date.precision === "unknown" ? "" : scan.date.label;
+  if (field === "description") return scan.description || "";
+  return scan[field];
+}
+
+const changedElsewhere = (theirs) =>
+  Object.keys(FORM_FIELD_LABELS).filter((k) => k in state.base && !sameValue(savedValue(theirs, k), state.base[k]));
+
+/** Someone else saved this scan since it was loaded, and changed a field this save also changes: let the
+    operator decide, never drop either side silently. */
+function resolveConflict(body, theirs) {
+  const mine = Object.keys(body).filter((k) => k in FORM_FIELD_LABELS);
+  const changedThere = changedElsewhere(theirs);
+  const names = (keys) => keys.map((k) => FORM_FIELD_LABELS[k]).join(", ") || "nothing you can see here";
+  $("conflict-body").textContent =
+    `Someone else (or another tab) saved scan #${String(theirs.id).padStart(6, "0")} after you opened it. ` +
+    `Changed there: ${names(changedThere)}. Your unsaved changes: ${names(mine)}.`;
+  return new Promise((resolve) => {
+    const dialog = $("conflict-dialog");
+    dialog.returnValue = "";
+    dialog.onclose = () => resolve(dialog.returnValue || "cancel");
+    dialog.showModal();
+    $("conflict-mine").focus();
+  });
 }
 
 async function save(extra = {}) {
   if (state.selectedId == null) return null;
-  const scan = await api("PATCH", `/api/scans/${state.selectedId}`, formBody(extra));
+  const url = `/api/scans/${state.selectedId}`;
+  const body = formBody(extra);
+  if (Object.keys(body).length === 1) { markDirty(false); return state.current; } // only the version: nothing to save
+  let scan;
+  try {
+    scan = await api("PATCH", url, body);
+  } catch (e) {
+    if (e.status !== 409 || e.detail?.code !== "conflict") throw e;
+    const theirs = e.detail.scan;
+    // Only fields this save sends are written, so a save elsewhere that touched other fields can't be lost:
+    // go ahead without asking. Ask only when both sides changed the same field.
+    const overlap = changedElsewhere(theirs).some((k) => k in body);
+    const choice = overlap ? await resolveConflict(body, theirs) : "mine";
+    if (choice === "mine") {
+      scan = await api("PATCH", url, { ...body, version: theirs.version });
+    } else if (choice === "theirs") {
+      showEditor(theirs, { full: true });
+      markDirty(false);
+      throw new Error("Showing the version saved elsewhere. Your changes were not saved.");
+    } else {
+      throw new Error("Not saved. Your changes are still on screen.");
+    }
+  }
+  state.version = scan.version;
+  Object.assign(state.base, formValues()); // what's on screen is now what's saved
+  state.current = scan;
   markDirty(false);
   return scan;
 }

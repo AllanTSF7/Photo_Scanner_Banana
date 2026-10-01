@@ -604,3 +604,62 @@ def test_delete_keeps_the_originals_when_the_record_cannot_be_removed(client, mo
 
     assert Path(scan["front_path"]).exists() and Path(scan["back_path"]).exists()
     assert c.get(f"/api/scans/{scan['id']}").status_code == 200
+
+
+def test_a_save_based_on_an_old_version_is_refused_with_the_current_scan(client):
+    c, _ = client
+    c.post("/api/ingest")
+    scan = c.get("/api/scans").json()[0]
+    first = c.patch(f"/api/scans/{scan['id']}", json={"description": "tab A", "version": scan["version"]})
+    assert first.status_code == 200 and first.json()["version"] == scan["version"] + 1
+
+    stale = c.patch(f"/api/scans/{scan['id']}", json={"description": "tab B", "version": scan["version"]})
+    assert stale.status_code == 409
+    detail = stale.json()["detail"]
+    assert detail["code"] == "conflict" and detail["scan"]["description"] == "tab A"
+
+    retry = c.patch(f"/api/scans/{scan['id']}", json={"description": "tab B", "version": detail["scan"]["version"]})
+    assert retry.status_code == 200 and retry.json()["description"] == "tab B"  # "keep mine", knowingly
+
+
+def test_a_partial_save_leaves_other_fields_alone(client):
+    """Two reviewers editing different fields of one scan no longer wipe each other's work."""
+    c, _ = client
+    c.post("/api/ingest")
+    scan = c.get("/api/scans").json()[0]
+    sid = scan["id"]
+    a = c.patch(f"/api/scans/{sid}", json={"people": ["Grandma"], "version": scan["version"]}).json()
+    b = c.patch(f"/api/scans/{sid}", json={"description": "Christmas"}).json()  # sent only what it changed
+    assert b["people"] == ["Grandma"] and b["description"] == "Christmas"
+    assert b["version"] == a["version"] + 1
+
+
+def test_read_text_finishing_after_a_save_does_not_overwrite_it(client, monkeypatch):
+    """Read text runs for seconds; a description typed and saved meanwhile used to be overwritten by it."""
+    import banana.web.api as api
+    from banana import db
+    from banana.models import Scan
+
+    c, _ = client
+    c.post("/api/ingest")
+    sid = next(s for s in c.get("/api/scans").json() if s["has_back"])["id"]
+    calls = []
+
+    def slow_ocr(scan, settings, known=None, learned=None):
+        calls.append(scan.description)
+        if len(calls) == 1:  # the operator saves while the first OCR pass is still running
+            with db.session(api.engine) as other:
+                row = other.get(Scan, sid)
+                row.description = "typed by the operator"
+                other.add(row)
+                other.commit()
+        if not (scan.description or "").strip():
+            scan.description = "from OCR"
+        scan.ocr_lines = [{"text": "Xmas '84"}]
+        return []
+
+    monkeypatch.setattr(api, "read_back_text", slow_ocr)
+    result = c.post(f"/api/scans/{sid}/read-text").json()
+    assert result["description"] == "typed by the operator"
+    assert result["ocr_lines"] == [{"text": "Xmas '84"}]
+    assert calls == [None, "typed by the operator"]  # re-ran on the fresh row instead of committing the stale one

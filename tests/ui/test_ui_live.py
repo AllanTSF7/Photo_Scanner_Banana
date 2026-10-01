@@ -1413,3 +1413,81 @@ def test_ingest_button_reports_files_set_aside(page, server):
     _sh.copy(first, server["root"] / "inbox" / "Attic3_0001.jpg")  # the very same photo dropped again
     page.click("#btn-ingest")
     expect(toast(page)).to_contain_text("Already ingested, set aside: Attic3_0001")
+
+
+# ---------------------------------------------------------------- two editors, one scan
+
+
+def _two_tabs_on_first_scan(browser, server):
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
+    a, b = context.new_page(), context.new_page()
+    a.goto(server["base"] + "/")
+    ingest(a)
+    for pg in (a, b):
+        if pg is b:
+            pg.goto(server["base"] + "/")
+        pg.locator("#scan-list li").first.click()
+        expect(pg.locator("#editor")).to_be_visible()
+    return context, a, b
+
+
+def _save(pg):
+    pg.locator("#form button[type=submit]").scroll_into_view_if_needed()
+    pg.click("#form button[type=submit]")
+
+
+def test_conflict_keep_my_changes_at_400px(browser, server):
+    context, a, b = _two_tabs_on_first_scan(browser, server)
+    a.fill("#description", "Saved in tab A")
+    _save(a)
+    expect(toast(a)).to_have_text("Saved")
+
+    b.fill("#description", "Typed in tab B")
+    _save(b)
+    dialog = b.locator("#conflict-dialog")
+    expect(dialog).to_be_visible()
+    expect(b.locator("#conflict-body")).to_contain_text("Changed there: Description")
+    assert no_horizontal_scroll(b)
+    keep = b.locator("#conflict-mine")
+    expect(keep).to_be_enabled()
+    keep.click()
+    expect(dialog).to_be_hidden()
+    expect(toast(b)).to_have_text("Saved")
+    a.reload()
+    a.locator("#scan-list li").first.click()
+    expect(a.locator("#description")).to_have_value("Typed in tab B")
+    context.close()
+
+
+def test_conflict_use_the_saved_version_at_400px(browser, server):
+    context, a, b = _two_tabs_on_first_scan(browser, server)
+    a.fill("#description", "Saved in tab A")
+    _save(a)
+    expect(toast(a)).to_have_text("Saved")
+
+    b.fill("#description", "Typed in tab B")
+    _save(b)
+    theirs = b.locator("#conflict-theirs")
+    expect(theirs).to_be_visible()
+    expect(theirs).to_be_enabled()
+    theirs.click()
+    expect(b.locator("#description")).to_have_value("Saved in tab A")
+    expect(toast(b)).to_contain_text("Your changes were not saved")
+    context.close()
+
+
+def test_two_editors_changing_different_fields_keep_both(browser, server):
+    context, a, b = _two_tabs_on_first_scan(browser, server)
+    a.fill("#description", "Christmas at Grandma's")
+    _save(a)
+    expect(toast(a)).to_have_text("Saved")
+    b.fill("#date-text", "Xmas '84")
+    _save(b)
+    # Only the date is sent, so A's description can't be lost: saved without asking.
+    expect(toast(b)).to_have_text("Saved")
+    expect(b.locator("#conflict-dialog")).to_be_hidden()
+    b.reload()
+    b.locator("#scan-list li").first.click()
+    expect(b.locator("#description")).to_have_value("Christmas at Grandma's")
+    expect(b.locator("#date-text")).to_have_value("1984-12-25")
+    context.close()

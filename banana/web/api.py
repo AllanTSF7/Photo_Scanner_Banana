@@ -12,9 +12,11 @@ from urllib.parse import urlsplit
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import Session, select
 
 from banana import __version__, auth, core, db
@@ -53,6 +55,14 @@ app = FastAPI(
     description="Scan triage backend: ingest the scanner inbox, review dates/tags, export EXIF+XMP for Immich.",
 )
 app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+@app.exception_handler(StaleDataError)
+async def _stale_scan(_request: Request, _exc: StaleDataError) -> JSONResponse:
+    """Any other write based on an outdated read of a scan (see Scan.version)."""
+    return JSONResponse(status_code=409, content={"detail": {
+        "code": "conflict", "message": "This scan was changed elsewhere while this was running. Reload it and try again.",
+    }})
 scans = sane.ScanController(settings.scanner, settings.paths.inbox)
 ingests = IngestRunner(engine, settings)  # every ingest goes through this: one at a time, never overlapping
 immich_check = ImmichCheckController(engine, settings)
@@ -463,11 +473,25 @@ class ScanUpdate(BaseModel):
     back_rotation: Literal[0, 90, 180, 270] | None = None
     operator_duplicate: bool | None = None
     operator_immich_duplicate: bool | None = None
+    # The scan's `version` when the editor loaded it. A different current version means it was saved elsewhere
+    # since (another tab, another reviewer, a slow Read text): 409 instead of silently overwriting either side.
+    version: int | None = None
+
+
+def _conflict(session: Session, scan: Scan) -> HTTPException:
+    return HTTPException(409, {
+        "code": "conflict",
+        "message": "This scan was changed elsewhere since you opened it.",
+        "scan": jsonable_encoder(_scan_json(session, scan)),
+    })
 
 
 @app.patch("/api/scans/{scan_id}", tags=["scans"])
 def update_scan(scan_id: int, body: ScanUpdate, session: Session = Depends(get_session)) -> dict:
+    """Change only the fields sent (absent = unchanged). Send `version` to be told about a conflicting save."""
     scan = _get_scan(session, scan_id)
+    if body.version is not None and body.version != scan.version:
+        raise _conflict(session, scan)
     if body.date is not None:
         try:
             scan.set_photo_date(PhotoDate(**body.date.model_dump()), "manual")
@@ -491,6 +515,9 @@ def update_scan(scan_id: int, body: ScanUpdate, session: Session = Depends(get_s
             setattr(scan, name, value)
     if scan.back_path is None:
         scan.keep_back = False
+    entities_recorded = all(k in (scan.suggestions or {}) for k in ("people", "places", "events"))
+    if body.description is not None or (body.status == ScanStatus.APPROVED.value and not entities_recorded):
+        _record_entities_from_description(session, scan)
     scan.updated_at = utcnow()
     session.add(scan)
     recorded = None
@@ -661,26 +688,44 @@ def swap_sides(scan_id: int, session: Session = Depends(get_session)) -> dict:
 @app.post("/api/scans/{scan_id}/read-text", tags=["scans"])
 def read_text(scan_id: int, session: Session = Depends(get_session)) -> dict:
     """OCR the back again (current crop and rotation). Fills description/date only if they're empty."""
-    scan = _get_scan(session, scan_id)
-    if not scan.back_path:
-        raise HTTPException(409, "scan has no back image")
-    learned = dictionary.build(session)
-    if read_back_text(scan, settings, known=known_entities(session, exclude_id=scan.id), learned=learned) is None:
-        raise HTTPException(503, f"no text reader available: {ocr.reader_error() or 'install the ocr extra'}")
-    scan.updated_at = utcnow()
-    session.add(scan)
-    session.commit()
-    return _scan_json(session, scan)
+    def work(scan: Scan) -> None:
+        if not scan.back_path:
+            raise HTTPException(409, "scan has no back image")
+        learned = dictionary.build(session)
+        known = known_entities(session, exclude_id=scan.id)
+        if read_back_text(scan, settings, known=known, learned=learned) is None:
+            raise HTTPException(503, f"no text reader available: {ocr.reader_error() or 'install the ocr extra'}")
+
+    return _scan_json(session, _update_fresh(session, scan_id, work))
 
 
 @app.post("/api/scans/{scan_id}/reanalyze", tags=["scans"])
 def reanalyze(scan_id: int, session: Session = Depends(get_session)) -> dict:
     """Detect the photo crop again and re-run the blank-back and duplicate checks. Rotations are kept."""
-    scan = _get_scan(session, scan_id)
-    analyze_scan(session, scan, settings)
-    scan.updated_at = utcnow()
-    session.commit()
-    return _scan_json(session, scan)
+    return _scan_json(session, _update_fresh(session, scan_id, lambda scan: analyze_scan(session, scan, settings)))
+
+
+def _update_fresh(session: Session, scan_id: int, work, attempts: int = 3) -> Scan:
+    """Run a slow change (OCR, re-analysis) and commit it, without overwriting a save made while it ran.
+
+    These only fill fields that are still empty, so if the operator saved meanwhile (StaleDataError on commit),
+    re-running on the fresh row gives the right result. No autoflush while working: the write lock is taken
+    only by the final commit, never held through seconds of OCR."""
+    for attempt in range(attempts):
+        scan = _get_scan(session, scan_id)
+        with session.no_autoflush:
+            work(scan)
+        scan.updated_at = utcnow()
+        session.add(scan)
+        try:
+            session.commit()
+            return scan
+        except StaleDataError:
+            session.rollback()
+            session.expire_all()
+            if attempt == attempts - 1:
+                raise
+    raise AssertionError("unreachable")
 
 
 class EntityRequest(BaseModel):
@@ -691,16 +736,23 @@ class EntityRequest(BaseModel):
 @app.post("/api/entities/extract", tags=["text"])
 def extract_entities(body: EntityRequest, session: Session = Depends(get_session)) -> dict:
     """People, places and events mentioned in a description (offline NER + rules + names used on other scans).
-    With a scan_id the result is also recorded as that scan's suggestion, for correction events on approval."""
+    Read-only: it used to record the result on the scan, so merely opening a scan wrote to the database (1,285
+    calls on the first production day) and moved its version under the editor. The suggestion the learning loop
+    needs is recorded by the save that changes the description (`_record_entities_from_description`)."""
     learned = dictionary.build(session)
     found, producer = extract_for_scan(body.text, settings, known_entities(session, exclude_id=body.scan_id), learned)
-    if body.scan_id is not None and settings.analysis.derive_entities:
-        scan = session.get(Scan, body.scan_id)
-        if scan is not None:
-            record_entity_suggestions(scan, found, producer)
-            session.add(scan)
-            session.commit()
     return {**found.to_dict(), "engine": entities.engine_name(), "producer": producer}
+
+
+def _record_entities_from_description(session: Session, scan: Scan) -> None:
+    """Record what the app would suggest from the scan's saved description, so an approval's correction events
+    compare the operator's people/places/events against it. Runs inside the save; never changes the values."""
+    if not settings.analysis.derive_entities or not (scan.description or "").strip():
+        return
+    with session.no_autoflush:  # reads only: the save's own commit is the one UPDATE (one version bump)
+        learned = dictionary.build(session)
+        found, producer = extract_for_scan(scan.description, settings, known_entities(session, exclude_id=scan.id), learned)
+    record_entity_suggestions(scan, found, producer)
 
 
 class AutocorrectRequest(BaseModel):

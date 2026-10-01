@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timezone
 from enum import Enum
 
-from sqlalchemy import JSON, Column
+from sqlalchemy import JSON, Column, Integer
 from sqlmodel import Field, SQLModel
 
 from banana.dates import PhotoDate, Precision
@@ -28,6 +28,9 @@ class Batch(SQLModel, table=True):
     name: str = Field(unique=True, index=True)
     box_label: str | None = None
     created_at: datetime = Field(default_factory=utcnow)
+
+
+_SCAN_VERSION = Column("version", Integer, nullable=False, default=0, server_default="0")
 
 
 class Scan(SQLModel, table=True):
@@ -82,6 +85,11 @@ class Scan(SQLModel, table=True):
 
     created_at: datetime = Field(default_factory=utcnow)
     updated_at: datetime = Field(default_factory=utcnow)
+    # Optimistic locking: SQLAlchemy bumps this on every UPDATE and refuses one based on an older read
+    # (StaleDataError). Two tabs, two reviewers, or a slow OCR request finishing after the operator saved can
+    # no longer silently overwrite each other; the API turns it into a 409 the UI resolves with the operator.
+    version: int = Field(default=0, sa_column=_SCAN_VERSION)
+    __mapper_args__ = {"version_id_col": _SCAN_VERSION}
 
     def photo_date(self) -> PhotoDate:
         return PhotoDate(

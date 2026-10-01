@@ -304,6 +304,19 @@
     </form>
   </dialog>
 
+  <dialog id="conflict-dialog" class="confirm-dialog" aria-labelledby="conflict-title">
+    <form method="dialog" class="card">
+      <h2 id="conflict-title">Changed elsewhere</h2>
+      <p id="conflict-body"></p>
+      <div class="form-actions">
+        <button value="cancel" class="btn ghost" id="conflict-cancel">Not now</button>
+        <span class="spacer"></span>
+        <button value="theirs" class="btn" id="conflict-theirs">Use the saved version</button>
+        <button value="mine" class="btn primary" id="conflict-mine">Keep my changes</button>
+      </div>
+    </form>
+  </dialog>
+
   <div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
   <script src="/static/vendor/driver/driver.js"></script>
   <script src="/static/app.js"></script>

@@ -356,6 +356,19 @@ vocabulary words equally close leaves the word untouched rather than guessing.
   edited by hand follow the description. Otherwise new values appear as dashed **suggestion chips** (click to add).
   A chip the operator removes is dismissed for that scan and not re-added. The chip text input stays mounted during redraws (focus kept).
 - Real label result: `Jimmy Dawley` / `Chocolat Design` / `Field Trip`.
+- **`POST /api/entities/extract` is read-only [implemented]:** it never writes. The suggestion the learning loop
+  compares against is recorded by the `PATCH` that changes the description (or by the approval, if none was
+  recorded yet), inside that same save.
+
+### Concurrent edits **[implemented]**
+- `scan.version` is SQLAlchemy's `version_id_col`: every UPDATE bumps it and one based on an older read fails
+  (`StaleDataError` → 409 `{code: "conflict"}`).
+- The editor sends only the fields that differ from what it loaded, plus the `version` it loaded. On a 409 it
+  compares: if the other save changed different fields, it re-sends with the new version without asking
+  (nothing can be lost, since only its own fields are written); if both changed the same field it asks:
+  **Keep my changes**, **Use the saved version**, or **Not now** (changes stay on screen, unsaved).
+- Read text and Re-analyze compute on the row and commit; if the operator saved meanwhile they re-run on the
+  fresh row (they only fill empty fields), with autoflush off so the write lock is taken only by the commit.
 
 ## 4f. Learning loop
 
@@ -609,7 +622,8 @@ asset-count field name in `assets/statistics`'s response.
 | GET | `/api/scanner/scan` | `{state: idle\|scanning\|done\|failed, destination, run_name, started_at, finished_at, pages, files[], message, ingest}` |
 | GET | `/api/summary` | scan counts per status, native flag, configured paths |
 | GET | `/api/scans?status=&limit=` | list (default limit 500, max 5000), ordered by id |
-| GET | `/api/scans/{id}` | one scan |
+| GET | `/api/scans/{id}` | one scan (includes `version`) |
+| PATCH | `/api/scans/{id}` | change only the fields sent; with `version`, 409 `{code: "conflict", scan}` if it was saved elsewhere since **[implemented]** |
 | PATCH | `/api/scans/{id}` | update (see below) |
 | DELETE | `/api/scans/{id}` | delete a rejected scan's files + record; 409 unless rejected, unexported, and no correction history |
 | GET | `/api/scans/{id}/image/{front\|back}?size=` | cached JPEG preview, 64–4096 px (default 1600); 404 if missing |
