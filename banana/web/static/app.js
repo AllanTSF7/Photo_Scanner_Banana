@@ -134,6 +134,7 @@ document.addEventListener("keydown", (e) => {
 function chipsInput(container, field) {
   let values = [];
   let provisional = new Set(); // lower-cased values the app suggested and the operator hasn't committed
+  let stored = new Set(); // lower-cased values the scan already had when loaded (saved on the server)
   let extra = []; // derived values not in the field: offered as "+ value"
   const dismissed = new Set();
   let touched = false;
@@ -209,11 +210,24 @@ function chipsInput(container, field) {
 
   return {
     field,
-    get: () => { commit(); return [...values]; },
+    /** Values to save: everything except suggestions the browser added on its own. Those reach the server only
+        once the operator accepts them (click, edit, or Approve's prompt): opening a scan never commits them. */
+    get: () => { commit(); return values.filter((v) => !provisional.has(v.toLowerCase()) || stored.has(v.toLowerCase())); },
+    /** Suggested values still shown as provisional (dashed), whether derived here or filled in by the server. */
+    pending: () => values.filter((v) => provisional.has(v.toLowerCase())),
+    acceptPending: () => { if (provisional.size) { touch(); render(); } },
+    leaveOutPending: () => {
+      if (!provisional.size) return;
+      values = values.filter((v) => !provisional.has(v.toLowerCase()));
+      for (const v of provisional) dismissed.add(v);
+      touch();
+      render();
+    },
     /** Busy = focus or uncommitted typing: async refreshes must leave the field alone. */
     busy: () => container.contains(document.activeElement) || input.value.trim() !== "" || touched,
     set: (v, suggestedValues = [], committed = false) => {
       values = [...(v || [])];
+      stored = new Set(values.map((x) => x.toLowerCase()));
       autoFill = values.length === 0;
       const suggestedLower = new Set((suggestedValues || []).map((s) => s.toLowerCase()));
       provisional = committed ? new Set() : new Set(values.map((x) => x.toLowerCase()).filter((x) => suggestedLower.has(x)));
@@ -247,27 +261,33 @@ const chips = Object.fromEntries(
 let deriveTimer;
 let deriveSeq = 0;
 
+// The same description gives the same suggestions: re-renders after an action don't ask the server again.
+let lastDerive = { scanId: null, text: null, found: null };
+
 async function deriveEntities() {
   const scanId = state.selectedId;
   const text = $("description").value;
   const seq = ++deriveSeq;
   if (scanId == null) return;
   let found = { people: [], places: [], events: [] };
-  if (text.trim()) {
+  if (lastDerive.scanId === scanId && lastDerive.text === text) {
+    found = lastDerive.found;
+  } else if (text.trim()) {
     try {
       found = await api("POST", "/api/entities/extract", { text, scan_id: scanId });
     } catch {
       return; // a convenience; never block editing
     }
+    lastDerive = { scanId, text, found };
   }
   if (seq !== deriveSeq || scanId !== state.selectedId) return;
-  let changed = false;
-  for (const f of ENTITY_FIELDS) changed = chips[f].derive(found[f]) || changed;
+  for (const f of ENTITY_FIELDS) chips[f].derive(found[f]);
   $("derive-hint").hidden = !ENTITY_FIELDS.some((f) => (found[f] || []).length);
-  if (changed) markDirty();
+  // Not markDirty(): a suggestion is not an edit. It's saved only once accepted (CLAUDE.md: suggested is never
+  // rendered or stored as committed). Before, opening a scan auto-saved its suggestions on the way out.
 }
 
-function scheduleDerive(delay = 400) {
+function scheduleDerive(delay = 1000) {
   clearTimeout(deriveTimer);
   deriveTimer = setTimeout(deriveEntities, delay);
 }
@@ -664,9 +684,33 @@ function setStatus(status) {
   return statusQueue;
 }
 
+/** Before approving: suggested names still shown dashed are not accepted yet. Ask, never assume. */
+function confirmSuggestions() {
+  const pending = ENTITY_FIELDS.concat(["tags"]).map((f) => [f, chips[f].pending()]).filter(([, v]) => v.length);
+  if (!pending.length) return Promise.resolve("none");
+  const count = pending.reduce((n, [, v]) => n + v.length, 0);
+  $("suggestions-title").textContent = `${count} suggestion${count === 1 ? "" : "s"} not accepted yet`;
+  $("suggestions-body").textContent = pending.map(([f, v]) => `${f[0].toUpperCase()}${f.slice(1)}: ${v.join(", ")}`).join(". ") + ".";
+  return new Promise((resolve) => {
+    const dialog = $("suggestions-dialog");
+    dialog.returnValue = "";
+    dialog.onclose = () => resolve(dialog.returnValue || "cancel");
+    dialog.showModal();
+    $("suggestions-accept").focus();
+  });
+}
+
 async function applyStatus(status) {
   if (state.selectedId == null) return;
   const currentIndex = state.scans.findIndex((s) => s.id === state.selectedId);
+  if (status === "approved") {
+    const choice = await confirmSuggestions();
+    if (choice === "cancel") return;
+    for (const f of CHIP_FIELDS) {
+      if (choice === "accept") chips[f].acceptPending();
+      else if (choice === "leave") chips[f].leaveOutPending();
+    }
+  }
   try {
     const scan = await save({ status });
     const recorded = scan.corrections_recorded;

@@ -121,7 +121,8 @@ It only touches words it's confident about (months, weekdays, seasons, common oc
 
 **Dashed means suggested.** Anything the app filled in or proposed (date, description, names, text lines,
 "cropped", "has writing", "dup?") is drawn with a dashed outline until you change it or approve the scan. A solid
-outline means you've confirmed it.
+outline means you've confirmed it. Suggested names are not saved just because you looked at a photo: if any are
+still dashed when you click **Approve**, the app asks whether to **Accept all** or **Leave them out**.
 
 **Buttons and shortcuts.** Every action has a button. The letter shown on a button is its keyboard shortcut:
 **Previous** `K`, **Next** `J`, **Approve** `A`, **Reject** `X`, **Flag duplicate** `D`, **Rotate right** `R`,

@@ -663,3 +663,17 @@ def test_read_text_finishing_after_a_save_does_not_overwrite_it(client, monkeypa
     assert result["description"] == "typed by the operator"
     assert result["ocr_lines"] == [{"text": "Xmas '84"}]
     assert calls == [None, "typed by the operator"]  # re-ran on the fresh row instead of committing the stale one
+
+
+def test_entity_extraction_never_writes_and_the_save_records_the_suggestion(client):
+    c, _ = client
+    c.post("/api/ingest")
+    scan = c.get("/api/scans").json()[0]
+    found = c.post("/api/entities/extract", json={"text": "Grandma at Uncle Bob's birthday", "scan_id": scan["id"]}).json()
+    assert "Grandma" in found["people"]
+    after = c.get(f"/api/scans/{scan['id']}").json()
+    assert after["version"] == scan["version"] and "people" not in after["suggestions"]  # nothing written
+
+    saved = c.patch(f"/api/scans/{scan['id']}", json={"description": "Grandma at Uncle Bob's birthday"}).json()
+    assert "Grandma" in saved["suggestions"]["people"]["value"]  # recorded by the save, for the learning loop
+    assert saved["people"] == []  # and never filled in as a value

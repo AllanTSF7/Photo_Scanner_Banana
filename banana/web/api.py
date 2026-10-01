@@ -739,7 +739,7 @@ def extract_entities(body: EntityRequest, session: Session = Depends(get_session
     Read-only: it used to record the result on the scan, so merely opening a scan wrote to the database (1,285
     calls on the first production day) and moved its version under the editor. The suggestion the learning loop
     needs is recorded by the save that changes the description (`_record_entities_from_description`)."""
-    learned = dictionary.build(session)
+    learned = dictionary.cached_build(session)
     found, producer = extract_for_scan(body.text, settings, known_entities(session, exclude_id=body.scan_id), learned)
     return {**found.to_dict(), "engine": entities.engine_name(), "producer": producer}
 

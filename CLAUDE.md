@@ -202,7 +202,12 @@ the UI means.
   secondary text) until the operator commits it. This is a data-integrity rule:
   the learning loop's `suggested` vs `approved` distinction is worthless if the
   operator cannot see it at a glance. Enforced by
-  `test_ui_provisional_marking`.
+  `test_ui_provisional_marking`. **Browsing never writes:** opening or leaving a
+  scan saves nothing, and a suggestion reaches the database only once the operator
+  accepts it (clicks or edits it, or answers Approve's "N suggestions not accepted:
+  Accept all / Leave them out" prompt). Enforced by
+  `test_opening_and_leaving_a_scan_saves_nothing`,
+  `test_approve_asks_about_suggestions_at_400px`.
 - **An async refresh NEVER replaces a field the operator is editing.** Any
   element with focus, or with uncommitted input, is exempt from suggestion
   refreshes and re-renders. (This was a real bug — chip-field keystrokes were

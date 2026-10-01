@@ -352,8 +352,12 @@ vocabulary words equally close leaves the word untouched rather than guessing.
   5. Event words (birthday, wedding, field trip, holidays, …), with ordinals kept (`5th Birthday`); `Xmas` → `Christmas`.
   6. Photo-lab noise dropped (`ORIGINAL`, `Kodak`, …); possessive `'s` removed; ALL-CAPS title-cased; de-duplicated.
 - **Server:** `read_back_text` fills **empty** people/places/events after writing the description.
-- **UI:** while the description changes (400 ms debounce), extraction runs. Fields that were empty when the scan opened and haven't been
-  edited by hand follow the description. Otherwise new values appear as dashed **suggestion chips** (click to add).
+- **UI:** when a scan opens and while the description changes (1 s debounce; the same text is never asked twice for a
+  scan), extraction runs. Fields that were empty when the scan opened and haven't been edited by hand follow the
+  description as **provisional** (dashed) chips; otherwise new values appear as **suggestion chips** (click to add).
+  **[implemented]** Provisional chips are not saved and don't mark the scan unsaved: only accepted values are sent.
+  **Approve** with provisional chips asks "N suggestions not accepted": **Accept all**, **Leave them out**, or
+  **Back to editing**. The server reuses the correction dictionary until a correction event or scan changes.
   A chip the operator removes is dismissed for that scan and not re-added. The chip text input stays mounted during redraws (focus kept).
 - Real label result: `Jimmy Dawley` / `Chocolat Design` / `Field Trip`.
 - **`POST /api/entities/extract` is read-only [implemented]:** it never writes. The suggestion the learning loop
@@ -371,6 +375,11 @@ vocabulary words equally close leaves the word untouched rather than guessing.
   fresh row (they only fill empty fields), with autoflush off so the write lock is taken only by the commit.
 
 ## 4f. Learning loop
+
+> **Data note (2026-10-01):** before this date, opening a scan auto-filled empty People/Places/Events and leaving
+> it saved them, so entity events with action `kept` created before 2026-10-01 may never have been looked at.
+> Stage 3 should treat person/place/event `kept` events older than that as unconfirmed (down-weight or exclude).
+> Events are append-only, so the date is the marker.
 
 Rules (from CLAUDE.md): local only; only **approved** scans produce training data; events are **append-only**;
 suggestions fill empty fields only and are never auto-approved; nothing is applied silently; model promotion requires beating

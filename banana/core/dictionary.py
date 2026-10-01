@@ -94,3 +94,27 @@ def build(session: Session) -> CorrectionDictionary:
         if count >= MIN_REMOVALS_TO_SUPPRESS and confirmed[(field_name, value)] == 0:
             dictionary.suppressed[field_name].add(value)
     return dictionary
+
+
+_cache: dict[str, tuple[tuple, CorrectionDictionary]] = {}
+
+
+def cached_build(session: Session) -> CorrectionDictionary:
+    """`build`, reused until its inputs change. Entity extraction runs while the operator types, and rebuilding
+    from every correction event each time was the bulk of its cost. Events are append-only and only count for
+    approved/exported scans, so (newest event id, scan count, newest scan update) changes whenever the result can."""
+    from sqlalchemy import func
+    from sqlmodel import select
+
+    from banana.models import CorrectionEvent, Scan
+
+    key = (
+        session.exec(select(func.max(CorrectionEvent.id))).one(),
+        *session.exec(select(func.count(Scan.id), func.max(Scan.updated_at))).one(),
+    )
+    hit = _cache.get(str(session.get_bind().url))
+    if hit is not None and hit[0] == key:
+        return hit[1]
+    dictionary = build(session)
+    _cache[str(session.get_bind().url)] = (key, dictionary)
+    return dictionary

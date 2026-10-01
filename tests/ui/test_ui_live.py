@@ -1491,3 +1491,66 @@ def test_two_editors_changing_different_fields_keep_both(browser, server):
     expect(b.locator("#description")).to_have_value("Christmas at Grandma's")
     expect(b.locator("#date-text")).to_have_value("1984-12-25")
     context.close()
+
+
+# ---------------------------------------------------------------- suggestions are never saved on their own
+
+
+def _scan_with_description(pg, server, text="Grandma at Uncle Bob's birthday"):
+    ingest(pg)
+    first = pg.evaluate("async () => (await (await fetch('/api/scans?status=needs_review')).json())[0]")
+    pg.evaluate("([id, text]) => fetch(`/api/scans/${id}`, {method: 'PATCH', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({description: text})})", [first["id"], text])
+    return first["id"]
+
+
+def test_opening_and_leaving_a_scan_saves_nothing(page, server):
+    sid = _scan_with_description(page, server)
+    page.reload()
+    patches = []
+    page.on("request", lambda r: patches.append(r.url) if r.method == "PATCH" else None)
+    page.locator(f'#scan-list li[data-id="{sid}"]').click()
+    expect(page.locator('.chips-input[data-field="people"] .chip[data-state="suggested"]').first).to_be_visible()
+    expect(page.locator("#save-state")).to_have_text("")  # a suggestion is not an unsaved change
+    page.click("#btn-next")
+    page.click("#btn-prev")
+    expect(page.locator("#editor")).to_be_visible()
+    assert patches == []
+    people = page.evaluate(f"async () => (await (await fetch('/api/scans/{sid}')).json()).people")
+    assert people == []
+
+
+@pytest.mark.parametrize("choice,expected", [("accept", True), ("leave", False)])
+def test_approve_asks_about_suggestions_at_400px(browser, server, choice, expected):
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    sid = _scan_with_description(pg, server)
+    pg.reload()
+    pg.locator(f'#scan-list li[data-id="{sid}"]').click()
+    expect(pg.locator('.chips-input[data-field="people"] .chip[data-state="suggested"]').first).to_be_visible()
+
+    pg.locator("#btn-approve").scroll_into_view_if_needed()
+    pg.click("#btn-approve")
+    dialog = pg.locator("#suggestions-dialog")
+    expect(dialog).to_be_visible()
+    expect(pg.locator("#suggestions-body")).to_contain_text("Grandma")
+    assert no_horizontal_scroll(pg)
+    button = pg.locator(f"#suggestions-{choice}")
+    expect(button).to_be_enabled()
+    button.click()
+    expect(toast(pg)).to_contain_text("approved")
+    people = pg.evaluate(f"async () => (await (await fetch('/api/scans/{sid}')).json()).people")
+    assert ("Grandma" in people) is expected
+    context.close()
+
+
+def test_approve_back_to_editing_keeps_everything_unsaved(page, server):
+    sid = _scan_with_description(page, server)
+    page.reload()
+    page.locator(f'#scan-list li[data-id="{sid}"]').click()
+    expect(page.locator('.chips-input[data-field="people"] .chip[data-state="suggested"]').first).to_be_visible()
+    page.click("#btn-approve")
+    page.click("#suggestions-cancel")
+    expect(page.locator("#suggestions-dialog")).to_be_hidden()
+    status = page.evaluate(f"async () => (await (await fetch('/api/scans/{sid}')).json()).status")
+    assert status == "needs_review"

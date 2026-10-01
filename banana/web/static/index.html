@@ -304,6 +304,20 @@
     </form>
   </dialog>
 
+  <dialog id="suggestions-dialog" class="confirm-dialog" aria-labelledby="suggestions-title">
+    <form method="dialog" class="card">
+      <h2 id="suggestions-title"></h2>
+      <p id="suggestions-body"></p>
+      <p class="muted">The dashed names were suggested by the app. Approving saves only what you accept.</p>
+      <div class="form-actions">
+        <button value="cancel" class="btn ghost" id="suggestions-cancel">Back to editing</button>
+        <span class="spacer"></span>
+        <button value="leave" class="btn" id="suggestions-leave">Leave them out</button>
+        <button value="accept" class="btn primary" id="suggestions-accept">Accept all</button>
+      </div>
+    </form>
+  </dialog>
+
   <dialog id="conflict-dialog" class="confirm-dialog" aria-labelledby="conflict-title">
     <form method="dialog" class="card">
       <h2 id="conflict-title">Changed elsewhere</h2>
