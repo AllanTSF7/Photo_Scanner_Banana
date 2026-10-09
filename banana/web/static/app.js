@@ -515,15 +515,22 @@ function showEditor(scan, { full = false } = {}) {
   scheduleDerive(0);
 }
 
-async function selectScan(id, force = false, full = false) {
-  if (!force && id === state.selectedId) return;
-  if (!(await confirmLeave())) return;
-  try {
-    const scan = await api("GET", `/api/scans/${id}`);
-    showEditor(scan, { full: full || id !== state.selectedId }); // a different scan always renders fully
-  } catch (e) {
-    toast(e.message, true);
-  }
+// The selection still loading, if any. Actions on "the selected scan" wait for it: a scan clicked in the list and
+// then approved straight away must be the one approved, not the one still on screen while it loads.
+let selecting = Promise.resolve();
+
+function selectScan(id, force = false, full = false) {
+  if (!force && id === state.selectedId) return selecting;
+  selecting = (async () => {
+    if (!(await confirmLeave())) return;
+    try {
+      const scan = await api("GET", `/api/scans/${id}`);
+      showEditor(scan, { full: full || id !== state.selectedId }); // a different scan always renders fully
+    } catch (e) {
+      toast(e.message, true);
+    }
+  })();
+  return selecting;
 }
 
 function renderDatePreview(candidates, error) {
@@ -701,6 +708,7 @@ function confirmSuggestions() {
 }
 
 async function applyStatus(status) {
+  await selecting;
   if (state.selectedId == null) return;
   const currentIndex = state.scans.findIndex((s) => s.id === state.selectedId);
   if (status === "approved") {
@@ -858,6 +866,7 @@ function showOcrSkeleton() {
 
 // ---------- scan actions ----------
 async function applyScanAction(run, message) {
+  await selecting;
   if (state.selectedId == null) return;
   try {
     const scan = await run();
@@ -881,6 +890,7 @@ async function withButton(button, fn) {
 }
 
 async function rotate(side, step) {
+  await selecting;
   if (state.selectedId == null) return;
   const scan = await api("GET", `/api/scans/${state.selectedId}`);
   const field = `${side}_rotation`;
