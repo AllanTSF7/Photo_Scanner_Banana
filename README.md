@@ -57,6 +57,13 @@ wsl -d Ubuntu-24.04 -- bash /mnt/c/Users/TSF2/Photo_Scanner_Banana/scripts/wsl_b
 On Windows without a C++ toolchain, skip `./native`: everything runs on the NumPy reference, and
 the native-equality tests are skipped. The exporter tests need `exiftool` on PATH.
 
+Windows desktop app (needs Python 3.12; reuses the installed app's compiled core, see the script header):
+
+```
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1            # build -> dist\PhotoScanner
+powershell -ExecutionPolicy Bypass -File scripts\build_windows.ps1 -Deploy    # + back up, install, restart
+```
+
 ```
 banana doctor          # shows native core / exiftool / path availability
 banana export --manual-json batch.json
