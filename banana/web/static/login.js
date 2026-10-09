@@ -7,7 +7,7 @@
 
   try {
     const state = await (await fetch("/api/auth/state")).json();
-    if (state.username) { location.replace("/"); return; }
+    if (state.username || state.login_required === false) { location.replace("/"); return; }
     if (state.setup_open) {
       mode = "setup";
       $("login-title").textContent = "Create the first account";

@@ -396,7 +396,7 @@ def test_session_cookie_is_httponly_strict_and_only_its_hash_is_stored(client):
 
 def test_first_account_setup_is_closed_by_default(client):
     with _anonymous() as anon:
-        assert anon.get("/api/auth/state").json() == {"setup_open": False, "username": None}
+        assert anon.get("/api/auth/state").json() == {"setup_open": False, "username": None, "login_required": True}
         assert anon.post("/api/auth/setup", json={"username": "mallory", "password": "long enough pw"}).status_code == 403
 
 
@@ -712,3 +712,48 @@ def test_entity_extraction_never_writes_and_the_save_records_the_suggestion(clie
     saved = c.patch(f"/api/scans/{scan['id']}", json={"description": "Grandma at Uncle Bob's birthday"}).json()
     assert "Grandma" in saved["suggestions"]["people"]["value"]  # recorded by the save, for the learning loop
     assert saved["people"] == []  # and never filled in as a value
+
+
+def _local_app(tmp_path, monkeypatch, auth_toml: str):
+    """The API with its own config: default loopback allowed_hosts plus `auth_toml` lines, no accounts."""
+    for name in ("inbox", "archive", "sorted", "data"):
+        (tmp_path / name).mkdir(exist_ok=True)
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[paths]\n" + "".join(f'{n} = "{(tmp_path / n).as_posix()}"\n' for n in ("inbox", "archive", "sorted")) +
+        f'data_dir = "{(tmp_path / "data").as_posix()}"\n'
+        "[analysis]\nread_text = false\n[ingest]\nwatch_inbox = false\n[auth]\n" + auth_toml,
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BANANA_CONFIG", str(config))
+    import banana.web.api as api
+
+    return importlib.reload(api).app
+
+
+def test_require_login_false_lets_this_pc_in_without_an_account(tmp_path, monkeypatch):
+    app = _local_app(tmp_path, monkeypatch, "require_login = false\n")
+    with TestClient(app, base_url="http://127.0.0.1:8420", client=("127.0.0.1", 50000)) as here:
+        assert here.get("/api/scans").status_code == 200
+        assert here.get("/", follow_redirects=False).status_code == 200
+        assert here.get("/api/auth/me").json() == {"username": None}
+        assert here.get("/api/auth/state").json()["login_required"] is False
+        # The other checks still apply: a cross-site write is refused even here.
+        assert here.post("/api/ingest", headers={"Origin": "http://evil.example"}).status_code == 403
+    with TestClient(app, base_url="http://127.0.0.1:8420", client=("192.168.1.50", 50000)) as elsewhere:
+        assert elsewhere.get("/api/scans").status_code == 401  # anything not from this PC still signs in
+        assert elsewhere.get("/api/auth/state").json()["login_required"] is True
+
+
+def test_require_login_false_is_ignored_when_the_app_answers_to_a_network_name(tmp_path, monkeypatch):
+    """A Tailscale TCP forward's visitors arrive from 127.0.0.1 too: once a non-loopback host is allowed, sign-in stays."""
+    app = _local_app(tmp_path, monkeypatch, 'require_login = false\nallowed_hosts = ["127.0.0.1", "photos.tailnet.ts.net"]\n')
+    with TestClient(app, base_url="http://127.0.0.1:8420", client=("127.0.0.1", 50000)) as here:
+        assert here.get("/api/scans").status_code == 401
+        assert here.get("/api/auth/state").json()["login_required"] is True
+
+
+def test_sign_in_is_required_by_default(tmp_path, monkeypatch):
+    app = _local_app(tmp_path, monkeypatch, "")
+    with TestClient(app, base_url="http://127.0.0.1:8420", client=("127.0.0.1", 50000)) as here:
+        assert here.get("/api/scans").status_code == 401

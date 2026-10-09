@@ -131,6 +131,7 @@ def test_new_configs_open_first_account_setup(tmp_path, monkeypatch):
 
     config = mod._ensure_config(tmp_path / "app")
     assert tomllib.loads(config.read_text(encoding="utf-8"))["auth"]["setup_page"] is True
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["auth"]["require_login"] is False  # desktop: this PC only
 
 
 def test_older_configs_without_auth_get_setup_added_but_operator_auth_is_left_alone(tmp_path, monkeypatch):

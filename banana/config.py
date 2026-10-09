@@ -107,6 +107,10 @@ class AuthConfig(BaseModel):
     # A first-run "create the first account" page, open only while no account exists. Desktop builds turn it
     # on (loopback on a personal PC); on a shared server leave it off and use `banana user add`.
     setup_page: bool = False
+    # false: requests from this PC itself need no sign-in (the desktop app). Only honoured while allowed_hosts holds
+    # loopback names only: anything else means the app is reachable from elsewhere (a Tailscale TCP forward's
+    # visitors also arrive from 127.0.0.1), so sign-in stays required for everyone. Host/Origin checks always apply.
+    require_login: bool = True
 
 
 class Settings(BaseModel):

@@ -32,7 +32,9 @@ data_dir = "{data_dir}"
 path = "{exiftool}"
 
 [auth]
-# The first launch offers a "create the first account" page; it closes as soon as one account exists.
+# No sign-in for this PC itself (the app only answers on 127.0.0.1). Set to true to require an account; the first
+# launch then offers a "create the first account" page, closed as soon as one account exists.
+require_login = false
 setup_page = true
 
 [scanner]

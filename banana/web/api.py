@@ -77,6 +77,17 @@ _PUBLIC_PATHS = {"/health", "/login", "/api/auth/login", "/api/auth/setup", "/ap
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _API_PREFIXES = ("/api/", "/docs", "/redoc", "/openapi.json")
 _ALLOWED_HOSTS = {h.strip("[]").lower() for h in settings.auth.allowed_hosts}
+_LOOPBACK = {"127.0.0.1", "::1", "localhost"}
+_LOGIN_WAIVABLE = not settings.auth.require_login and _ALLOWED_HOSTS <= _LOOPBACK
+if not settings.auth.require_login and not _LOGIN_WAIVABLE:
+    logging.getLogger("banana.auth").warning(
+        "[auth] require_login = false ignored: allowed_hosts %s includes a non-loopback name, so sign-in stays on",
+        sorted(_ALLOWED_HOSTS - _LOOPBACK))
+
+
+def _login_waived(request: Request) -> bool:
+    """[auth] require_login = false, and the request comes from this PC to a loopback-only app."""
+    return _LOGIN_WAIVABLE and request.client is not None and request.client.host in _LOOPBACK
 
 
 def _host_name(host_header: str) -> str:
@@ -97,6 +108,9 @@ async def security_gate(request: Request, call_next):
             return PlainTextResponse("Cross-site request refused.", status_code=403)
     path = request.url.path
     if path in _PUBLIC_PATHS or path.startswith("/static/"):
+        return await call_next(request)
+    if _login_waived(request):
+        request.state.username = None
         return await call_next(request)
     with db.session(engine) as session:
         user = auth.resolve_session(session, request.cookies.get(auth.COOKIE_NAME))
@@ -211,6 +225,7 @@ def auth_state(request: Request, session: Session = Depends(get_session)) -> dic
     return {
         "setup_open": settings.auth.setup_page and not auth.any_users(session),
         "username": user.username if user else None,
+        "login_required": not _login_waived(request),
     }
 
 

@@ -71,7 +71,13 @@ def read_text(request):
 
 
 @pytest.fixture
-def server(tmp_path, read_text):
+def auth_extra(request):
+    """Override with @pytest.mark.parametrize("auth_extra", ["require_login = false"], indirect=True)."""
+    return getattr(request, "param", "")
+
+
+@pytest.fixture
+def server(tmp_path, read_text, auth_extra):
     for name in ("inbox", "archive", "sorted", "data"):
         (tmp_path / name).mkdir()
     make_demo_inbox.main(tmp_path / "inbox")
@@ -90,7 +96,8 @@ def server(tmp_path, read_text):
         # real hardware (it did before this was pinned - "No photos in the feeder" came from the real scanner).
         + f'[scanner]\nhost = "127.0.0.1"\nport = {fake_port.port}\nbackend = "sane"\nscanimage = "{scanimage.as_posix()}"\n'
         + f"[analysis]\nread_text = {'true' if read_text else 'false'}\n"
-        + "[ingest]\nsettle_seconds = 0\nwatch_inbox = false\n",
+        + "[ingest]\nsettle_seconds = 0\nwatch_inbox = false\n"
+        + (f"[auth]\n{auth_extra}\n" if auth_extra else ""),
         encoding="utf-8",
     )
     from banana import auth, db
@@ -1336,6 +1343,23 @@ def _strand_run(root, name="scan20260930132056", seeds=(98, 110)):
     demo.back(["page three"]).save(folder / "page_0003.jpg", "JPEG")
     demo.front(seeds[1]).save(folder / "page_0004.bmp", "BMP")
     return folder
+
+
+@pytest.mark.parametrize("auth_extra", ["require_login = false"], indirect=True)
+def test_no_sign_in_on_this_pc_when_not_required_at_400px(browser, server):
+    """[auth] require_login = false (the desktop app): the review screen opens straight away, Sign out is hidden,
+    and /login sends you back to it."""
+    context = browser.new_context(viewport={"width": 400, "height": 800})  # no session cookie
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    expect(pg.locator("#btn-ingest")).to_be_visible()
+    expect(pg.locator("#btn-logout")).to_be_hidden()
+    pg.click("#btn-ingest")
+    expect(toast(pg)).to_contain_text("Ingested 7 scan(s)")
+    pg.goto(server["base"] + "/login")
+    expect(pg).to_have_url(server["base"] + "/")
+    assert no_horizontal_scroll(pg)
+    context.close()
 
 
 def test_scan_alert_recover_button_at_400px(browser, server):

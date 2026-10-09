@@ -99,7 +99,9 @@ click **Re-detect crop**. If it's still wrong, the photo may be on a background 
 - Reading takes about 1–2 s per back, so ingesting a large stack takes a little longer.
 
 ### Sharing the dev laptop's app with other devices on the network
-The server runs inside WSL, which other devices can't reach directly. It has **no login (B-3)**, so share only on a trusted network.
+The server runs inside WSL, which other devices can't reach directly. Other devices must **sign in**: add the
+name or IP they use to `[auth] allowed_hosts`, which also switches `require_login = false` off, so sign-in then
+applies to everyone (B-42). Share only on a trusted network.
 
 **On the tailnet (recommended for a phone/iPad already on the same Tailscale network):** the default server
 binding (`127.0.0.1:8000`) is enough - no `BANANA_HOST=0.0.0.0` needed. In an **ordinary** PowerShell (no admin):
@@ -309,6 +311,7 @@ Don't edit the database while the server is running unless you know what you're 
 | B-39 | The app slowed as the library grew: several requests loaded every scan or every correction event in full (at 2,580 scans / 28,934 events: save with a description ~1.0 s, autocorrect ~1.0 s, Learning panel 3.9 s, ~1.2 s extra per ingested photo) | medium | fixed: training events filtered in SQL, dictionary cached with a key ordinary saves don't change, column-only reads for known names / duplicate check / summary, list without N+1, Learning counts in SQL; outputs identical on a live-DB snapshot; `test_cached_dictionary_survives_saves_but_follows_training_changes`, `test_training_events_field_filters` |
 | B-40 | Clicking a scan in the list and pressing Approve straight away approved the scan still on screen while the new one loaded (a following Reject then hit the clicked scan) | high | fixed: approve/reject and scan actions wait for the pending selection; `test_rapid_approve_then_reject_acts_on_the_next_scan` (was flaky, failing ~2 in 3) |
 | B-41 | The first launch of an updated build recovered ~45 old cut-off scan runs (388 photos back to 2026-10-01) and ingested them; 278 had already been scanned again, flooding review with rescans | high | fixed: recovered photos matching a scan already in the library go to `inbox/_already_scanned` (kept; **Ingest them anyway** in System), the watcher is held off during recovery; `test_a_recovered_run_already_scanned_again_is_set_aside_not_reviewed`, `test_recovered_rescans_are_set_aside_and_can_be_ingested_anyway_at_400px`, `test_the_watcher_stays_out_while_held` |
+| B-42 | After updating, the desktop app required an account the operator didn't want; a tab opened under the old build kept polling with 401s and hid the Scan button instead of going to sign-in | medium | fixed: `[auth] require_login = false` (desktop default) lets this PC in without an account while the app answers to loopback names only; Host/Origin checks still apply and other machines still sign in. Pages from builds before sign-in can't redirect themselves; reload once. `test_require_login_false_lets_this_pc_in_without_an_account`, `test_require_login_false_is_ignored_when_the_app_answers_to_a_network_name`, `test_no_sign_in_on_this_pc_when_not_required_at_400px` |
 
 #### B-6 Scan interrupted by a server restart
 Scans run inside the server process. Restarting it (deploy, crash, or the live dev server reloading after a

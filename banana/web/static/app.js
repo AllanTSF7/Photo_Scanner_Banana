@@ -1519,7 +1519,10 @@ $("btn-immich-check").onclick = () => withButton($("btn-immich-check"), async ()
 });
 
 // ---------- account ----------
-api("GET", "/api/auth/me").then((me) => { $("user-chip").textContent = me.username; }).catch(() => {});
+api("GET", "/api/auth/me").then((me) => {
+  $("user-chip").textContent = me.username ?? "";
+  $("btn-logout").hidden = !me.username; // no sign-in on this PC ([auth] require_login = false): nothing to sign out of
+}).catch(() => {});
 $("btn-logout").onclick = async () => {
   try { await api("POST", "/api/auth/logout"); } catch { /* already signed out */ }
   location.replace("/login");

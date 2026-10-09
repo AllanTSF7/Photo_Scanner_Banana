@@ -820,6 +820,10 @@ Loaded from `--config`, else `$BANANA_CONFIG`, else `./config.toml`, else defaul
 | `exiftool.path` | `exiftool` | |
 | `immich.enabled` | `false` | hard opt-in; filling in `url`/`api_key` alone never starts any network activity |
 | `immich.url`, `api_key`, `library_id`, `import_path_prefix` | | **[implemented]** pre-set for a headless deploy; once the operator saves anything in the Immich panel, the `immich_setting` DB row takes precedence |
+| `auth.allowed_hosts` | `["127.0.0.1", "localhost", "::1"]` | **[implemented]** Host names the app answers to (blocks DNS rebinding); a cross-site write (Origin ≠ Host) is always refused |
+| `auth.require_login` | `true` (desktop config: `false`) | **[implemented]** `false`: requests from this PC itself need no account (B-42). Honoured only while `allowed_hosts` holds loopback names only — any other name means the app is reachable from elsewhere (a Tailscale TCP forward's visitors also arrive from 127.0.0.1), so sign-in stays required for everyone. Requests from other machines always sign in |
+| `auth.setup_page` | `false` (desktop config: `true`) | **[implemented]** first-account setup page while sign-in is required and no account exists |
+| `auth.session_days` | `30` | **[implemented]** |
 
 ---
 
