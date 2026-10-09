@@ -5,7 +5,7 @@ import os
 import re
 import threading
 import time
-from collections import Counter, deque
+from collections import deque
 from pathlib import Path
 from typing import Literal
 from urllib.parse import urlsplit
@@ -16,6 +16,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from sqlalchemy import func
 from sqlalchemy.orm.exc import StaleDataError
 from sqlmodel import Session, select
 
@@ -127,9 +128,15 @@ def _date_json(d: PhotoDate) -> dict:
     }
 
 
-def _scan_json(session: Session, scan: Scan) -> dict:
-    batch = session.get(Batch, scan.batch_id)
-    export = session.exec(select(Export).where(Export.scan_id == scan.id)).first()
+_UNSET = object()
+
+
+def _scan_json(session: Session, scan: Scan, batch=_UNSET, export=_UNSET) -> dict:
+    """`batch`/`export` may be passed in pre-fetched (None = known to be absent) so a list costs 3 queries, not 2N+1."""
+    if batch is _UNSET:
+        batch = session.get(Batch, scan.batch_id)
+    if export is _UNSET:
+        export = session.exec(select(Export).where(Export.scan_id == scan.id)).first()
     data = scan.model_dump()
     data.update(
         batch=batch.name if batch else None,
@@ -250,7 +257,7 @@ def health() -> dict:
 
 @app.get("/api/summary", tags=["system"])
 def summary(session: Session = Depends(get_session)) -> dict:
-    counts = Counter(s.status for s in session.exec(select(Scan)))
+    counts = dict(session.exec(select(Scan.status, func.count()).group_by(Scan.status)).all())
     return {
         "counts": {status.value: counts.get(status.value, 0) for status in ScanStatus},
         "native_core": core.NATIVE_AVAILABLE,
@@ -451,7 +458,12 @@ def list_scans(
     query = select(Scan).order_by(Scan.id).limit(limit)
     if status:
         query = query.where(Scan.status == status)
-    return [_scan_json(session, s) for s in session.exec(query)]
+    page = list(session.exec(query))
+    batch_ids = {s.batch_id for s in page}
+    batches = {b.id: b for b in session.exec(select(Batch).where(Batch.id.in_(batch_ids)))} if batch_ids else {}
+    scan_ids = [s.id for s in page]
+    exports = {e.scan_id: e for e in session.exec(select(Export).where(Export.scan_id.in_(scan_ids)))} if scan_ids else {}
+    return [_scan_json(session, s, batches.get(s.batch_id), exports.get(s.id)) for s in page]
 
 
 @app.get("/api/scans/{scan_id}", tags=["scans"])
@@ -607,19 +619,31 @@ def scan_corrections(scan_id: int, session: Session = Depends(get_session)) -> l
 @app.get("/api/learning", tags=["learning"])
 def learning_status(session: Session = Depends(get_session)) -> dict:
     """Learning loop state: recorded corrections, the correction dictionary, threshold proposals, active producers."""
-    all_events = list(session.exec(select(CorrectionEvent)))
-    usable = corrections.training_events(session)
+    events_total, approvals = session.exec(
+        select(func.count(CorrectionEvent.id), func.count(func.distinct(CorrectionEvent.approval_id)))
+    ).one()
+    # Counted in SQL: building ~29k event objects just to count them took ~0.9 s (2026-10-08).
     by_field: dict[str, dict[str, int]] = {}
-    for event in usable:
-        by_field.setdefault(event.field, {"kept": 0, "edited": 0, "removed": 0, "added": 0})[event.action] += 1
-    learned = dictionary.build(session)
+    action_counts = session.exec(
+        corrections.training_select(CorrectionEvent.field, CorrectionEvent.action, func.count())
+        .group_by(CorrectionEvent.field, CorrectionEvent.action).order_by(func.min(CorrectionEvent.id))
+    )
+    for field_name, action, count in action_counts:
+        by_field.setdefault(field_name, {"kept": 0, "edited": 0, "removed": 0, "added": 0})[action] = count
+    events_usable, scans_with_corrections = session.exec(
+        corrections.training_select(func.count(), func.count(func.distinct(CorrectionEvent.scan_id)))
+    ).one()
+    line_images = session.exec(
+        corrections.training_select(func.count(), fields=("ocr_line",))
+        .where(func.coalesce(func.json_extract(CorrectionEvent.asset_ref, "$.image"), "") != "")
+    ).one()
+    learned = dictionary.cached_build(session)
     overrides = [o.model_dump() for o in session.exec(select(SettingOverride))]
-    line_images = sum(1 for e in usable if e.field == "ocr_line" and (e.asset_ref or {}).get("image"))
     return {
-        "events_total": len(all_events),
-        "events_usable": len(usable),
-        "approvals": len({e.approval_id for e in all_events}),
-        "scans_with_corrections": len({e.scan_id for e in usable}),
+        "events_total": events_total,
+        "events_usable": events_usable,
+        "approvals": approvals,
+        "scans_with_corrections": scans_with_corrections,
         "by_field": by_field,
         "ocr_line_images": line_images,
         "dictionary": {**learned.to_dict(), "size": learned.size},
@@ -691,7 +715,7 @@ def read_text(scan_id: int, session: Session = Depends(get_session)) -> dict:
     def work(scan: Scan) -> None:
         if not scan.back_path:
             raise HTTPException(409, "scan has no back image")
-        learned = dictionary.build(session)
+        learned = dictionary.cached_build(session)
         known = known_entities(session, exclude_id=scan.id)
         if read_back_text(scan, settings, known=known, learned=learned) is None:
             raise HTTPException(503, f"no text reader available: {ocr.reader_error() or 'install the ocr extra'}")
@@ -750,7 +774,7 @@ def _record_entities_from_description(session: Session, scan: Scan) -> None:
     if not settings.analysis.derive_entities or not (scan.description or "").strip():
         return
     with session.no_autoflush:  # reads only: the save's own commit is the one UPDATE (one version bump)
-        learned = dictionary.build(session)
+        learned = dictionary.cached_build(session)
         found, producer = extract_for_scan(scan.description, settings, known_entities(session, exclude_id=scan.id), learned)
     record_entity_suggestions(scan, found, producer)
 
@@ -766,7 +790,7 @@ def autocorrect_text(body: AutocorrectRequest, session: Session = Depends(get_se
     Offline and reversible: the caller shows every fix and can put the original back."""
     known = known_entities(session, exclude_id=body.scan_id)
     protected = known.people + known.places + known.events
-    fixed, fixes = autocorrect.correct(body.text, learned=dictionary.build(session), protected=protected)
+    fixed, fixes = autocorrect.correct(body.text, learned=dictionary.cached_build(session), protected=protected)
     return {"text": fixed, "fixes": [f.to_dict() for f in fixes], "producer": autocorrect.VERSION}
 
 

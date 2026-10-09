@@ -178,6 +178,53 @@ def test_dictionary_learns_line_and_word_fixes_and_suppression(env):
     assert learned.is_suppressed("person", "chocolat") and not learned.is_suppressed("person", "Jimmy Dawley")
 
 
+def test_cached_dictionary_survives_saves_but_follows_training_changes(env, monkeypatch):
+    settings, engine, back = env
+    builds = []
+    real_build = dictionary.build
+    monkeypatch.setattr(dictionary, "build", lambda session: builds.append(1) or real_build(session))
+
+    def suppressed(session):
+        return dictionary.cached_build(session).is_suppressed("person", "Chocolat")
+
+    with db.session(engine) as session:
+        for sid in (1, 2):
+            scan = make_scan(session, back, sid)
+            scan.people = ["Jimmy Dawley"]  # "Chocolat" removed on both: suppressed
+            approve(session, scan, settings)
+        assert suppressed(session) and len(builds) == 1
+
+        first = session.get(Scan, 1)
+        first.description = "Field trip"  # an ordinary save changes nothing the dictionary reads
+        session.commit()
+        make_scan(session, back, 3)  # nor does a new pending scan
+        session.commit()
+        assert suppressed(session) and len(builds) == 1
+
+        session.get(Scan, 2).status = ScanStatus.REJECTED.value  # leaves training data without writing events
+        session.commit()
+        assert not suppressed(session) and len(builds) == 2
+
+        third = session.get(Scan, 3)
+        third.people = ["Jimmy Dawley"]
+        approve(session, third, settings)  # enters training data: new events
+        assert suppressed(session) and len(builds) == 3
+
+
+def test_training_events_field_filters(env):
+    settings, engine, back = env
+    with db.session(engine) as session:
+        approve(session, make_scan(session, back, 1), settings)
+        every = corrections.training_events(session)
+        people = corrections.training_events(session, "person")
+        no_kept_lines = corrections.training_events(session, fields=("ocr_line", "person"), skip=(("ocr_line", "kept"),))
+    assert people and {e.field for e in people} == {"person"}
+    assert [e.id for e in people] == [e.id for e in every if e.field == "person"]
+    assert [e.id for e in no_kept_lines] == [
+        e.id for e in every if e.field in ("ocr_line", "person") and (e.field, e.action) != ("ocr_line", "kept")
+    ]
+
+
 def test_dictionary_applied_to_new_ocr(env, monkeypatch):
     from banana.analysis import ocr
     from banana.ingest import service

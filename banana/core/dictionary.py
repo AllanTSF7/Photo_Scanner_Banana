@@ -79,7 +79,8 @@ def build(session: Session) -> CorrectionDictionary:
     dictionary = CorrectionDictionary()
     removed: Counter = Counter()
     confirmed: Counter = Counter()
-    for event in training_events(session):
+    # Only the fields read below; kept OCR lines (most events) never change the dictionary.
+    for event in training_events(session, fields=("ocr_line", "person", "place", "event"), skip=(("ocr_line", "kept"),)):
         if event.field == "ocr_line" and event.action == "edited" and event.suggested and event.approved:
             raw = (event.asset_ref or {}).get("raw_ocr") or event.suggested
             dictionary.lines[normalize(raw)] = event.approved
@@ -101,16 +102,19 @@ _cache: dict[str, tuple[tuple, CorrectionDictionary]] = {}
 
 def cached_build(session: Session) -> CorrectionDictionary:
     """`build`, reused until its inputs change. Entity extraction runs while the operator types, and rebuilding
-    from every correction event each time was the bulk of its cost. Events are append-only and only count for
-    approved/exported scans, so (newest event id, scan count, newest scan update) changes whenever the result can."""
+    from every correction event each time was the bulk of its cost. The result depends only on the events of scans
+    in a training status. Entering one always writes events (a new newest id); leaving one (reject, back to review)
+    lowers the count; a scan with events can't be deleted. So (newest event id, training-scan count) changes
+    whenever the result can, and an ordinary save no longer throws the dictionary away."""
     from sqlalchemy import func
     from sqlmodel import select
 
+    from banana.core.corrections import TRAINING_STATUSES
     from banana.models import CorrectionEvent, Scan
 
     key = (
         session.exec(select(func.max(CorrectionEvent.id))).one(),
-        *session.exec(select(func.count(Scan.id), func.max(Scan.updated_at))).one(),
+        session.exec(select(func.count(Scan.id)).where(Scan.status.in_(TRAINING_STATUSES))).one(),
     )
     hit = _cache.get(str(session.get_bind().url))
     if hit is not None and hit[0] == key:

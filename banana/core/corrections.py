@@ -13,6 +13,8 @@ import uuid
 from importlib import metadata
 from pathlib import Path
 
+from sqlalchemy import and_
+from sqlalchemy.orm import aliased
 from sqlmodel import Session, select
 
 from banana import imaging
@@ -239,15 +241,35 @@ def _discard_line_images(events: list[CorrectionEvent]) -> None:
             Path(image).unlink(missing_ok=True)
 
 
-def training_events(session: Session, field: str | None = None) -> list[CorrectionEvent]:
-    """Events usable for training: latest approval per scan, and only for scans that are currently approved/exported."""
-    rows = session.exec(
-        select(CorrectionEvent, Scan.status).join(Scan, Scan.id == CorrectionEvent.scan_id).order_by(CorrectionEvent.id)
-    ).all()
-    latest: dict[int, str] = {}
-    for event, _status in rows:
-        latest[event.scan_id] = event.approval_id
-    return [
-        event for event, status in rows
-        if status in TRAINING_STATUSES and latest[event.scan_id] == event.approval_id and (field is None or event.field == field)
-    ]
+def training_select(*columns, fields: tuple[str, ...] | None = None, skip: tuple[tuple[str, str], ...] = ()):
+    """`select(*columns)` over the events usable for training: latest approval per scan, and only for scans that are
+    currently approved/exported. `fields` keeps only those fields; `skip` drops (field, action) pairs.
+    Pass aggregates as `columns` to count without loading the events."""
+    latest = aliased(CorrectionEvent)
+    latest_approval = (
+        select(latest.approval_id).where(latest.scan_id == CorrectionEvent.scan_id)
+        .order_by(latest.id.desc()).limit(1).scalar_subquery()
+    )
+    query = (
+        select(*columns).select_from(CorrectionEvent).join(Scan, Scan.id == CorrectionEvent.scan_id)
+        .where(Scan.status.in_(TRAINING_STATUSES), CorrectionEvent.approval_id == latest_approval)
+    )
+    if fields is not None:
+        query = query.where(CorrectionEvent.field.in_(fields))
+    for skip_field, skip_action in skip:
+        query = query.where(~and_(CorrectionEvent.field == skip_field, CorrectionEvent.action == skip_action))
+    return query
+
+
+def training_events(
+    session: Session, field: str | None = None, *,
+    fields: tuple[str, ...] | None = None, skip: tuple[tuple[str, str], ...] = (),
+) -> list[CorrectionEvent]:
+    """The events `training_select` describes, oldest first. `field` is shorthand for `fields=(field,)`.
+
+    Filtered in SQL: loading every event and filtering in Python took ~0.8 s at 29k events (2026-10-08), and it
+    ran on every save, autocorrect and ingested photo. Ask only for the fields you read - building the objects
+    is now the main cost."""
+    if field is not None:
+        fields = (field,)
+    return list(session.exec(training_select(CorrectionEvent, fields=fields, skip=skip).order_by(CorrectionEvent.id)))

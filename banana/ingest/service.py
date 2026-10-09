@@ -275,17 +275,20 @@ def analyze_scan(
 
     scan.duplicate_group_id = None
     distance = None
-    others = session.exec(select(Scan).where(Scan.id != scan.id, Scan.dhash_hex.is_not(None)).order_by(Scan.id))
-    for other in others:
-        d = core.hamming(value, int(other.dhash_hex, 16))
+    others = session.exec(
+        select(Scan.id, Scan.dhash_hex, Scan.duplicate_group_id)
+        .where(Scan.id != scan.id, Scan.dhash_hex.is_not(None)).order_by(Scan.id)
+    )
+    for other_id, other_dhash, other_group in others:
+        d = core.hamming(value, int(other_dhash, 16))
         if d <= settings.analysis.dhash_max_distance:
-            scan.duplicate_group_id = other.duplicate_group_id or other.id
+            scan.duplicate_group_id = other_group or other_id
             distance = d
             break
     corrections.suggest(scan, "duplicate", scan.duplicate_group_id, produced["duplicate"], distance=distance)
     if settings.analysis.read_text and back and scan.back_type != "blank":
         read_back_text(scan, settings, known=known_entities(session, exclude_id=scan.id),
-                       learned=dictionary.build(session))
+                       learned=dictionary.cached_build(session))
     if add:
         session.add(scan)
     return scan
@@ -336,14 +339,15 @@ def repair_dangling_duplicate_groups(session: Session) -> int:
 
 def known_entities(session: Session, exclude_id: int | None = None) -> Entities:
     """Every person, place and event already entered on other scans: the family's own vocabulary."""
-    known = Entities()
-    for other in session.exec(select(Scan).where(Scan.id != (exclude_id or -1))):
-        for name in ("people", "places", "events"):
-            target = getattr(known, name)
-            for value in getattr(other, name) or []:
-                if value not in target:
-                    target.append(value)
-    return known
+    # Three columns, not whole rows: parsing every scan's OCR lines and suggestions cost ~0.2 s at 2.6k scans.
+    seen: dict[str, dict[str, None]] = {"people": {}, "places": {}, "events": {}}
+    rows = session.exec(
+        select(Scan.people, Scan.places, Scan.events).where(Scan.id != (exclude_id or -1)).order_by(Scan.id)
+    )
+    for row in rows:
+        for name, values in zip(("people", "places", "events"), row):
+            seen[name].update(dict.fromkeys(values or []))
+    return Entities(**{name: list(values) for name, values in seen.items()})
 
 
 def extract_for_scan(
