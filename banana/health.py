@@ -142,6 +142,8 @@ def ingest_check(status: dict) -> dict:
     problems = []
     if status["unreadable"]:
         problems.append(f"{len(status['unreadable'])} file(s) set aside as unreadable in inbox/_unreadable")
+    if status.get("already_scanned"):
+        problems.append(f"{len(status['already_scanned'])} recovered file(s) look already scanned, set aside in inbox/_already_scanned")
     if status["orphans"]:
         problems.append(f"{status['orphans']} archived file(s) have no scan (an older ingest stopped partway)")
     if status["last_error"]:

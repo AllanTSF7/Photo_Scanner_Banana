@@ -32,6 +32,9 @@ log = logging.getLogger(__name__)
 
 UNREADABLE_DIR = "_unreadable"  # inside the inbox; ingest only reads top-level files, so it is never re-read
 ALREADY_INGESTED_DIR = "_already_ingested"
+# Recovered photos that look like a scan already in the library (an old cut-off run the operator scanned again).
+# Kept, never deleted; "Ingest them anyway" puts them back. Inside the inbox, so ingest never re-reads them.
+ALREADY_SCANNED_DIR = "_already_scanned"
 
 
 @dataclass
@@ -44,6 +47,7 @@ class IngestReport:
     not_ready: list[str] = field(default_factory=list)  # still being written: picked up next time
     failed: list[dict] = field(default_factory=list)  # {"name", "error"}; left in the inbox, retried next time
     unreadable: list[str] = field(default_factory=list)  # failed too often: moved to inbox/_unreadable/
+    already_scanned: list[dict] = field(default_factory=list)  # {"name", "matches"}: moved to inbox/_already_scanned/
 
 
 # Attempts per photo that failed to open/decode, kept for the life of the process: {base: (count, first_seen)}.
@@ -88,6 +92,7 @@ def _unique_batch_name(session: Session, base: str) -> str:
 
 def ingest_inbox(
     session: Session, settings: Settings, batch_name: str | None = None, *, trusted: Iterable[str] = (),
+    set_aside_rescans: Iterable[str] = (),
 ) -> IngestReport:
     """Ingest every ready photo in the inbox, one photo per transaction.
 
@@ -98,10 +103,15 @@ def ingest_inbox(
 
     `trusted`: file names this app just placed itself (a finished scan run), exempt from the "still being
     written" check. Anything else must be untouched for `ingest.settle_seconds` first.
+
+    `set_aside_rescans`: file names placed by a scan recovery. One that matches a scan already in the library is
+    moved to inbox/_already_scanned instead of the review queue: a stranded run is often one the operator already
+    scanned again (the first update recovered 388 such photos, 278 of them rescans). Any other ingest still
+    only flags a possible rescan, because there the operator chose to scan the photo again.
     """
     inbox = settings.paths.inbox
     files = [p for p in inbox.iterdir() if p.is_file()] if inbox.exists() else []
-    trusted = set(trusted)
+    trusted, set_aside_rescans = set(trusted), set(set_aside_rescans)
     now = time.time()
     ready = [p for p in files if p.name in trusted or _ready(p, now, settings.ingest.settle_seconds)]
     paired = pair_files(ready, settings.pairing.pattern)
@@ -129,6 +139,13 @@ def ingest_inbox(
             _record_failure(group, exc, inbox, report, settings)
             continue
         session.rollback()  # analysis only read; drop that read transaction before writing
+        if scan.duplicate_group_id and Path(scan.front_path).name in set_aside_rescans:
+            _move_aside(group, inbox / ALREADY_SCANNED_DIR)
+            _failures.pop(group.base.lower(), None)
+            report.already_scanned.append({"name": group.base, "matches": scan.duplicate_group_id})
+            log.info("ingest: recovered %s looks like scan #%d; set aside in %s", group.base,
+                     scan.duplicate_group_id, ALREADY_SCANNED_DIR)
+            continue
 
         moved: list[tuple[Path, Path]] = []
         try:

@@ -564,15 +564,15 @@ def test_export_approved(client):
 
 
 def test_stranded_scan_runs_are_reported_and_recovered_into_review(client):
-    from PIL import Image
-
     c, root = client
     c.post("/api/ingest")  # clear the demo inbox first
     folder = root / "inbox" / ".scanning-scan20260930132056"
     folder.mkdir()
-    for n in (1, 2, 3):
-        Image.new("RGB", (400, 300), (40 * n, 90, 60)).save(folder / f"page_{n:04d}.jpg", "JPEG")
-    Image.new("RGB", (400, 300), (200, 90, 60)).save(folder / "page_0004.bmp", "BMP")
+    # Back first (photos go in face down); seeds far from every demo photo, so neither looks already scanned.
+    make_demo_inbox.back(["one"]).save(folder / "page_0001.jpg", "JPEG")
+    make_demo_inbox.front(98).save(folder / "page_0002.jpg", "JPEG")
+    make_demo_inbox.back(["three"]).save(folder / "page_0003.jpg", "JPEG")
+    make_demo_inbox.front(110).save(folder / "page_0004.bmp", "BMP")
 
     assert c.get("/api/scanner").json()["stranded"] == [{"run": "scan20260930132056", "files": 4}]
 
@@ -581,6 +581,41 @@ def test_stranded_scan_runs_are_reported_and_recovered_into_review(client):
     assert len(r["ingest"]["created"]) == 2  # two photos, front + back each
     assert not folder.exists()
     assert c.get("/api/scanner").json()["stranded"] == []
+
+
+def test_a_recovered_run_already_scanned_again_is_set_aside_not_reviewed(client):
+    """The first update recovered 388 photos from old cut-off runs; 278 had already been scanned again."""
+    c, root = client
+    c.post("/api/ingest")
+    before = len(c.get("/api/scans?status=needs_review").json())
+    folder = root / "inbox" / ".scanning-scan20261001094418"
+    folder.mkdir()
+    make_demo_inbox.back(["Xmas '84"]).save(folder / "page_0001.jpg", "JPEG")  # back first: photos go in face down
+    make_demo_inbox.front(11).save(folder / "page_0002.jpg", "JPEG")  # Attic3_0001's photo: already ingested
+    make_demo_inbox.back(["new"]).save(folder / "page_0003.jpg", "JPEG")
+    make_demo_inbox.front(122).save(folder / "page_0004.jpg", "JPEG")  # never scanned, far from every demo photo
+
+    r = c.post("/api/scanner/recover").json()
+    assert [a["name"] for a in r["ingest"]["already_scanned"]] == ["scan20261001094418_0001"]
+    assert len(r["ingest"]["created"]) == 1
+    assert len(c.get("/api/scans?status=needs_review").json()) == before + 1
+    aside = root / "inbox" / "_already_scanned"
+    assert sorted(p.name for p in aside.iterdir()) == ["scan20261001094418_0001.jpg", "scan20261001094418_0001_b.jpg"]
+    assert c.get("/api/ingest/status").json()["already_scanned"] == sorted(p.name for p in aside.iterdir())
+
+    anyway = c.post("/api/ingest/already-scanned").json()  # the operator's call: review them after all
+    assert anyway["moved"] == 2 and len(anyway["ingest"]["created"]) == 1
+    assert anyway["ingest"]["possible_duplicates"] == anyway["ingest"]["created"]  # flagged, not hidden
+    assert not any(aside.iterdir())
+
+
+def test_an_ordinary_ingest_still_only_flags_a_rescan(client):
+    """Setting aside is for recovered runs only: a photo the operator chose to scan again goes to review, flagged."""
+    c, root = client
+    c.post("/api/ingest")
+    make_demo_inbox.front(11).save(root / "inbox" / "Rescan_0001.jpg", "JPEG")
+    r = c.post("/api/ingest").json()
+    assert len(r["created"]) == 1 and r["possible_duplicates"] == r["created"] and r["already_scanned"] == []
 
 
 def test_delete_keeps_the_originals_when_the_record_cannot_be_removed(client, monkeypatch):

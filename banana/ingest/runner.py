@@ -7,6 +7,7 @@ from __future__ import annotations
 import logging
 import shutil
 import threading
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -35,16 +36,19 @@ class IngestRunner:
         self.orphans: list[str] = []
         self._watcher: threading.Thread | None = None
         self._stop = threading.Event()
+        self._held = threading.Event()  # set by hold(): the watcher stays out
 
     # ------------------------------------------------------------ running
-    def run(self, reason: str = "manual", trusted: Iterable[str] = ()) -> dict:
-        """Ingest the inbox. Waits for an ingest already in progress, then runs (they queue, never overlap)."""
+    def run(self, reason: str = "manual", trusted: Iterable[str] = (), set_aside_rescans: Iterable[str] = ()) -> dict:
+        """Ingest the inbox. Waits for an ingest already in progress, then runs (they queue, never overlap).
+        `set_aside_rescans`: see `service.ingest_inbox`."""
         with self._lock:
             with self._state:
                 self.running_since = datetime.now().isoformat(timespec="seconds")
             try:
                 with db.session(self.engine) as session:
-                    report = service.ingest_inbox(session, self.settings, trusted=trusted)
+                    report = service.ingest_inbox(session, self.settings, trusted=trusted,
+                                                  set_aside_rescans=set_aside_rescans)
                 result = report.__dict__
                 error = None
             except Exception as exc:
@@ -61,17 +65,30 @@ class IngestRunner:
                 self.last_result, self.last_error = result, error
                 if result["created"]:
                     self.runs += 1
-        if result["created"] or result["failed"] or result["unreadable"]:
+        if result["created"] or result["failed"] or result["unreadable"] or result["already_scanned"]:
             log.info(
-                "ingest (%s): %d created, %d possible rescan(s), %d skipped, %d not ready, %d failed, %d unreadable",
+                "ingest (%s): %d created, %d possible rescan(s), %d skipped, %d not ready, %d failed, %d unreadable, "
+                "%d already scanned",
                 reason, len(result["created"]), len(result["possible_duplicates"]), len(result["skipped"]),
                 len(result["not_ready"]), len(result["failed"]), len(result["unreadable"]),
+                len(result["already_scanned"]),
             )
         return result
 
     @property
     def busy(self) -> bool:
         return self._lock.locked()
+
+    @contextmanager
+    def hold(self):
+        """Keep the watcher from starting an ingest, e.g. while a recovery places pages and then ingests them
+        itself: recovered files keep their old timestamps, so the watcher would otherwise take them as settled
+        and ingest them first, without the already-scanned check."""
+        self._held.set()
+        try:
+            yield
+        finally:
+            self._held.clear()
 
     # ------------------------------------------------------------ watcher
     def start_watching(self) -> None:
@@ -86,7 +103,7 @@ class IngestRunner:
     def _watch(self) -> None:
         while not self._stop.wait(self.settings.ingest.watch_seconds):
             try:
-                if not self.busy and self._has_files():
+                if not self.busy and not self._held.is_set() and self._has_files():
                     self.run(reason="watcher")
             except Exception:  # noqa: BLE001 - logged in run(); the watcher must keep going
                 pass
@@ -96,21 +113,36 @@ class IngestRunner:
         return inbox.exists() and any(p.is_file() for p in inbox.iterdir())
 
     # ------------------------------------------------------------ problems the operator should see
-    def unreadable(self) -> list[str]:
-        folder = self.settings.paths.inbox / service.UNREADABLE_DIR
+    def _set_aside(self, name: str) -> list[str]:
+        folder = self.settings.paths.inbox / name
         return sorted(p.name for p in folder.iterdir() if p.is_file()) if folder.exists() else []
 
-    def retry_unreadable(self) -> int:
-        """Put every file from inbox/_unreadable back into the inbox for another try."""
-        folder = self.settings.paths.inbox / service.UNREADABLE_DIR
+    def _put_back(self, name: str) -> int:
+        folder = self.settings.paths.inbox / name
         moved = 0
         for path in sorted(folder.iterdir()) if folder.exists() else []:
             target = self.settings.paths.inbox / path.name
             if path.is_file() and not target.exists():
                 shutil.move(path, target)
                 moved += 1
+        return moved
+
+    def unreadable(self) -> list[str]:
+        return self._set_aside(service.UNREADABLE_DIR)
+
+    def retry_unreadable(self) -> int:
+        """Put every file from inbox/_unreadable back into the inbox for another try."""
+        moved = self._put_back(service.UNREADABLE_DIR)
         service._failures.clear()
         return moved
+
+    def already_scanned(self) -> list[str]:
+        return self._set_aside(service.ALREADY_SCANNED_DIR)
+
+    def put_back_already_scanned(self) -> int:
+        """Put every recovered photo from inbox/_already_scanned back into the inbox; the next ingest adds them to
+        review, flagged as possible rescans."""
+        return self._put_back(service.ALREADY_SCANNED_DIR)
 
     def check_orphans(self) -> list[str]:
         with db.session(self.engine) as session:
@@ -136,6 +168,7 @@ class IngestRunner:
                 "last_error": self.last_error,
                 "runs": self.runs,
                 "unreadable": self.unreadable(),
+                "already_scanned": self.already_scanned(),
                 "orphans": len(self.orphans),
                 "orphan_examples": self.orphans[:5],
             }

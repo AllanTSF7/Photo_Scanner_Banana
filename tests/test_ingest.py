@@ -246,6 +246,26 @@ def test_the_watcher_picks_up_dropped_files_on_its_own(env):
         runner.stop_watching()
 
 
+def test_the_watcher_stays_out_while_held(env):
+    """Recovery holds the watcher off: recovered files keep old timestamps, so it would ingest them first."""
+    settings, engine = env
+    settings.ingest.watch_inbox, settings.ingest.watch_seconds = True, 0.05
+    runner = IngestRunner(engine, settings)
+    runner.start_watching()
+    try:
+        with runner.hold():
+            drop(settings.paths.inbox, "Box_0001", 1)
+            time.sleep(0.5)
+            assert scans(engine) == []
+        for _ in range(100):
+            if scans(engine):
+                break
+            time.sleep(0.05)
+        assert len(scans(engine)) == 1
+    finally:
+        runner.stop_watching()
+
+
 def test_retry_unreadable_puts_files_back(env):
     settings, engine = env
     folder = settings.paths.inbox / service.UNREADABLE_DIR

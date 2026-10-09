@@ -286,15 +286,17 @@ def _ingest_after_scan() -> dict:
 
 @app.post("/api/scanner/recover", tags=["scanner"])
 def recover_scans() -> dict:
-    """Finish scan runs that stopped before their pages reached the inbox, then ingest them for review."""
-    try:
-        result = scans.recover()
-    except RuntimeError as exc:
-        raise HTTPException(409, str(exc)) from exc
-    if result["recovered"]:
-        runs = tuple(f"{r['run']}_" for r in result["recovered"])
-        placed = [p.name for p in settings.paths.inbox.iterdir() if p.is_file() and p.name.startswith(runs)]
-        result["ingest"] = ingests.run(reason="recover", trusted=placed)
+    """Finish scan runs that stopped before their pages reached the inbox, then ingest them for review. A recovered
+    photo that matches a scan already in the library is set aside in inbox/_already_scanned instead."""
+    with ingests.hold():  # the watcher must not ingest recovered pages before the already-scanned check
+        try:
+            result = scans.recover()
+        except RuntimeError as exc:
+            raise HTTPException(409, str(exc)) from exc
+        if result["recovered"]:
+            runs = tuple(f"{r['run']}_" for r in result["recovered"])
+            placed = [p.name for p in settings.paths.inbox.iterdir() if p.is_file() and p.name.startswith(runs)]
+            result["ingest"] = ingests.run(reason="recover", trusted=placed, set_aside_rescans=placed)
     return result
 
 
@@ -819,6 +821,13 @@ def retry_unreadable() -> dict:
     """Move every file from inbox/_unreadable back into the inbox and ingest again."""
     moved = ingests.retry_unreadable()
     return {"moved": moved, "ingest": ingests.run(reason="retry", trusted=()) if moved else None}
+
+
+@app.post("/api/ingest/already-scanned", tags=["pipeline"])
+def ingest_already_scanned() -> dict:
+    """Ingest the recovered photos set aside in inbox/_already_scanned anyway (they come in flagged as possible rescans)."""
+    moved = ingests.put_back_already_scanned()
+    return {"moved": moved, "ingest": ingests.run(reason="already-scanned", trusted=()) if moved else None}
 
 
 @app.post("/api/export", tags=["pipeline"])

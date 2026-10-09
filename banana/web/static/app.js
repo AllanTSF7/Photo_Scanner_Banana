@@ -970,6 +970,7 @@ function ingestLines(r) {
   if (r.not_ready?.length) lines.push(`${r.not_ready.length} file(s) still being written; picked up shortly`);
   if (r.failed?.length) lines.push(`Could not read: ${r.failed.map((f) => f.name).join(", ")} (will retry)`);
   if (r.unreadable?.length) lines.push(`Set aside as unreadable: ${r.unreadable.join(", ")} (see System)`);
+  if (r.already_scanned?.length) lines.push(`${r.already_scanned.length} recovered photo(s) look already scanned; set aside (see System)`);
   return lines;
 }
 
@@ -995,6 +996,11 @@ async function loadIngestStatus() {
   $("ingest-unreadable-text").textContent = s.unreadable.length
     ? `${s.unreadable.length} file(s) could not be read and were set aside in inbox/_unreadable: ${s.unreadable.join(", ")}`
     : "";
+  const already = s.already_scanned || [];
+  $("ingest-already-scanned").hidden = !already.length;
+  $("ingest-already-scanned-text").textContent = already.length
+    ? `${already.length} recovered file(s) look like scans you already have and were set aside in inbox/_already_scanned, not deleted. Ingest them anyway to review them as possible rescans.`
+    : "";
   if (ingestRuns !== null && s.runs > ingestRuns && s.last_result?.created?.length) {
     toast(`${s.last_result.created.length} new scan(s) added from the inbox`);
     await refresh();
@@ -1002,6 +1008,13 @@ async function loadIngestStatus() {
   ingestRuns = s.runs;
 }
 
+$("btn-ingest-already-scanned").onclick = () => withButton($("btn-ingest-already-scanned"), async () => {
+  const r = await api("POST", "/api/ingest/already-scanned");
+  toast(r.ingest ? ingestLines(r.ingest).join("\n") : "Nothing set aside");
+  ingestRuns = null; // our own ingest; don't announce it again
+  await loadIngestStatus();
+  if (r.ingest?.created?.length) await selectTab("needs_review");
+});
 $("btn-retry-unreadable").onclick = () => withButton($("btn-retry-unreadable"), async () => {
   const r = await api("POST", "/api/ingest/retry-unreadable");
   toast(r.ingest ? ingestLines(r.ingest).join("\n") : "Nothing to retry", !!(r.ingest?.unreadable?.length));
@@ -1087,10 +1100,13 @@ $("btn-recover").onclick = () => withButton($("btn-recover"), async () => {
   const placed = r.recovered.reduce((n, x) => n + x.files, 0);
   const created = r.ingest?.created?.length ?? 0;
   const dups = r.ingest?.possible_duplicates?.length ?? 0;
+  const aside = r.ingest?.already_scanned?.length ?? 0;
   const lines = [`Recovered ${placed} file(s); ${created} scan(s) added to review${dups ? `, ${dups} possible rescan(s)` : ""}`];
+  if (aside) lines.push(`${aside} photo(s) look like scans you already have; set aside, not deleted (see System)`);
   if (r.kept.length) lines.push(`${r.kept.reduce((n, x) => n + x.files, 0)} file(s) still could not be read and were left in place`);
   toast(lines.join("\n"), r.kept.length > 0);
-  await loadScannerStatus();
+  ingestRuns = null; // our own ingest; don't announce it again from the status poll
+  await Promise.all([loadScannerStatus(), loadIngestStatus()]); // shows any set-aside photos straight away
   if (created) await selectTab("needs_review");
 });
 

@@ -272,6 +272,8 @@ A `/` inside a name is changed to `-`, because `/` separates tag levels.
 **Do**
 - Finish scanning a stack before you ingest it.
 - If a bar appears under the header about a scan, read it: **Recover scans** brings kept pages into the queue.
+  Recovered photos that look like scans you already have are set aside instead (System panel, **Ingest them
+  anyway** if you want them in review after all). Nothing is deleted.
 - Reject bad scans instead of deleting files.
 - Add at least a decade to undated photos.
 

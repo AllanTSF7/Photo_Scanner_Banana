@@ -207,6 +207,13 @@ never moved). The System panel shows these as the **Ingest** row (`warn` when so
   `POST /api/scanner/recover` converts leftover BMPs, places the pages under the run's own name and ingests them;
   a page that can't be decoded is never deleted and is reported as `kept`. The same recovery runs on launch
   (`scanner.recover_on_start`, default true).
+- **Recovered rescans set aside [implemented]** (B-41): a stranded run is often one the operator already scanned
+  again. A recovered photo whose front dHash is within `analysis.dhash_max_distance` of any scan in the library is
+  moved to `inbox/_already_scanned/` instead of the review queue: kept, never deleted. The System panel lists them
+  (`#ingest-already-scanned`, ingest health `warn`) with **Ingest them anyway** (`POST /api/ingest/already-scanned`),
+  which puts them back and ingests them flagged as possible rescans. Only recovery does this; any other ingest
+  still only flags a rescan. Recovery holds the inbox watcher off while it runs (`IngestRunner.hold`): recovered
+  files keep their old timestamps, so the watcher would otherwise ingest them first, unchecked.
 - **Visible until dismissed [implemented]:** a failed run, a run that finished with a warning, or stranded runs show
   a bar under the header (`#scan-alert`, `role="alert"`) with **Recover scans** and **Dismiss**. Dismissing hides
   that exact state; anything new about it shows the bar again.

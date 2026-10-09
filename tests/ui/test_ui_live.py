@@ -1323,15 +1323,18 @@ def test_sign_in_page_wrong_password_then_sign_in_and_sign_out_at_400px(browser,
 # ---------------------------------------------------------------- scan problems stay visible
 
 
-def _strand_run(root, name="scan20260930132056"):
-    """A scan run that stopped before its pages reached the inbox: 3 JPEGs + the driver's unconverted last BMP."""
-    from PIL import Image
+def _strand_run(root, name="scan20260930132056", seeds=(98, 110)):
+    """A scan run that stopped before its pages reached the inbox: 2 photos, back first (photos go in face down),
+    the last page still the driver's unconverted BMP. Distinct photos, not flat colours: those all share one dHash
+    and would be set aside as rescans of each other (seeds 98/110 are >= 13 apart from every demo photo)."""
+    import make_demo_inbox as demo
 
     folder = root / "inbox" / f".scanning-{name}"
     folder.mkdir()
-    for n in (1, 2, 3):
-        Image.new("RGB", (400, 300), (40 * n, 90, 60)).save(folder / f"page_{n:04d}.jpg", "JPEG")
-    Image.new("RGB", (400, 300), (200, 90, 60)).save(folder / "page_0004.bmp", "BMP")
+    demo.back(["page one"]).save(folder / "page_0001.jpg", "JPEG")
+    demo.front(seeds[0]).save(folder / "page_0002.jpg", "JPEG")
+    demo.back(["page three"]).save(folder / "page_0003.jpg", "JPEG")
+    demo.front(seeds[1]).save(folder / "page_0004.bmp", "BMP")
     return folder
 
 
@@ -1355,6 +1358,40 @@ def test_scan_alert_recover_button_at_400px(browser, server):
     expect(alert).to_be_hidden()
     assert not folder.exists()
     expect(pg.locator("#scan-list li")).to_have_count(9)  # 2 recovered photos + the 7 demo scans
+    context.close()
+
+
+def test_recovered_rescans_are_set_aside_and_can_be_ingested_anyway_at_400px(browser, server):
+    """A stranded run the operator already scanned again: its photos are set aside, not added to review, and the
+    System panel offers Ingest them anyway."""
+    import make_demo_inbox as demo
+
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    ingest(pg)
+    folder = server["root"] / "inbox" / ".scanning-scan20261001094418"
+    folder.mkdir()
+    demo.back(["Xmas '84"]).save(folder / "page_0001.jpg", "JPEG")  # back first: photos go in face down
+    demo.front(11).save(folder / "page_0002.jpg", "JPEG")  # Attic3_0001's photo, already ingested above
+    pg.reload()
+    pg.click("#btn-recover")
+    expect(toast(pg)).to_contain_text("look like scans you already have")
+    expect(pg.locator("#scan-list li")).to_have_count(7)  # nothing new in review
+    assert sorted(p.name for p in (server["root"] / "inbox" / "_already_scanned").iterdir()) == [
+        "scan20261001094418_0001.jpg", "scan20261001094418_0001_b.jpg"]
+
+    pg.click("#btn-health")
+    box = pg.locator("#ingest-already-scanned")
+    expect(box).to_be_visible()
+    expect(box).to_contain_text("2 recovered file(s)")
+    expect(pg.locator('#health-list li[data-name="ingest"]')).to_have_attribute("data-status", "warn")
+    assert no_horizontal_scroll(pg)
+    anyway = pg.locator("#btn-ingest-already-scanned")
+    expect(anyway).to_be_enabled()
+    anyway.click()
+    expect(toast(pg)).to_contain_text("possible rescan")
+    expect(box).to_be_hidden()
     context.close()
 
 
