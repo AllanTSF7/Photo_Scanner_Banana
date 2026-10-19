@@ -863,5 +863,6 @@ def export_approved(session: Session = Depends(get_session)) -> dict:
                     exported.append({"id": scan.id, "front": record.front_rel, "back": record.back_rel})
                 except Exception as exc:  # noqa: BLE001 - reported per scan
                     session.rollback()
+                    logging.getLogger("banana.export").warning("export of scan %s failed: %s", scan.id, exc)
                     errors.append({"id": scan.id, "error": str(exc)})
     return {"exported": exported, "errors": errors}

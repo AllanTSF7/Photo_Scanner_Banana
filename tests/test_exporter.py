@@ -13,7 +13,8 @@ from banana.export.exiftool_writer import ExifToolWriter
 from banana.export.exporter import Exporter, ExportRequest
 from banana.export.metadata import PhotoMetadata
 
-EXIFTOOL = shutil.which("exiftool")
+_VENDORED = Path(__file__).resolve().parents[1] / "vendor" / "exiftool_win64" / "exiftool.exe"  # what the Windows app ships
+EXIFTOOL = shutil.which("exiftool") or (str(_VENDORED) if _VENDORED.exists() else None)
 pytestmark = pytest.mark.skipif(EXIFTOOL is None, reason="exiftool not installed")
 
 
@@ -70,3 +71,20 @@ def test_reexport_with_new_date_moves_files(tmp_path, writer):
     assert str(second.front_rel) == "1979/1979-06/SCAN_000007_A.jpg"
     tags = writer.read(root / second.front_rel)["XMP-lr:HierarchicalSubject"]
     assert json.dumps(tags) == json.dumps(["Family|Smiths", "Scan|DateApprox"])
+
+
+def test_text_outside_ascii_round_trips(tmp_path, writer):
+    """B-43: on Windows, text went to ExifTool as cp1252: "·" and "—" came back as "?" and "∈" or CJK crashed the
+    write, so 10 approved scans could never be exported. These are characters from those scans' OCR text."""
+    front = _jpeg(tmp_path / "Box3_0002.jpg", 3)
+    root = tmp_path / "sorted"
+    text = "CO., NAPA 1995 — Sept. 2·S § ∈ 人力 Café"
+    meta = PhotoMetadata(date=PhotoDate(Precision.DAY, 1995, 9, 2), description=text, people=["Zoë Müller"],
+                         places=["Napa — Calif."])
+
+    result = Exporter(root, writer).export(ExportRequest(43, None, front, None, meta))  # raises if readback differs
+
+    sidecar = writer.read(root / f"{result.front_rel}.xmp")
+    assert sidecar["XMP-dc:Description"] == text
+    assert "People/Zoë Müller" in sidecar["XMP-digiKam:TagsList"]
+    assert writer.read(root / result.front_rel)["IFD0:ImageDescription"] == text

@@ -56,7 +56,12 @@ def _as_list(value: object) -> list[str]:
 
 class ExifToolWriter:
     def __init__(self, executable: str = "exiftool") -> None:
-        self._et = exiftool.ExifToolHelper(executable=executable, common_args=["-charset", "filename=utf8"])
+        # encoding="utf-8": ExifTool reads its arguments as UTF-8, but pyexiftool defaults to the locale encoding.
+        # On Windows that's cp1252: "·" and "—" came back as "?" (verification failed) and "∈" or CJK text from
+        # OCR crashed the write, so those scans could never be exported (B-43).
+        self._et = exiftool.ExifToolHelper(
+            executable=executable, common_args=["-charset", "filename=utf8"], encoding="utf-8",
+        )
 
     def __enter__(self) -> ExifToolWriter:
         self._et.run()
