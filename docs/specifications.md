@@ -100,7 +100,9 @@ repair-duplicates` fixes any such reference left dangling from before this exist
 
 ### Tables
 
-**batch**: `id`, `name` (unique), `box_label`, `created_at`
+**batch**: `id`, `name` (unique), `box_label`, `audience` (`private` default | `family`; the privacy tier is decided per
+batch by the operator, never per photo and never from file names - **[implemented]** recorded only, nothing is moved or
+shared by it yet), `created_at`
 
 **scan**
 | Column | Type | Notes |
@@ -567,7 +569,11 @@ asset-count field name in `assets/statistics`'s response.
 
 ## 8. HTTP API
 
-**[implemented]** FastAPI. OpenAPI at `/openapi.json`, interactive docs at `/docs`. **No authentication.**
+**[implemented]** FastAPI. OpenAPI at `/openapi.json`, interactive docs at `/docs`. Every route except `/health`,
+`/login` and the `/api/auth/*` sign-in routes needs a signed-in session (cookie, scrypt-hashed passwords,
+`banana/auth.py`) **unless `[auth] required = false`**, which the packaged desktop build writes into its generated
+config: one computer, one person, bound to 127.0.0.1, no accounts. The Host check (DNS rebinding) and the
+Origin check on writes (cross-site requests) stay on in both modes. `GET /api/auth/state` reports `required`.
 
 | Method | Path | Purpose |
 |---|---|---|
@@ -579,8 +585,11 @@ asset-count field name in `assets/statistics`'s response.
 | POST | `/api/scans/{id}/reanalyze` | re-detect crops, re-run blank/duplicate checks and text reading |
 | POST | `/api/scans/{id}/read-text` | OCR the back again; fills empty description/date |
 | GET | `/api/scanner/scan` | `{state: idle\|scanning\|done\|failed, destination, run_name, started_at, finished_at, pages, files[], message, ingest}` |
-| GET | `/api/summary` | scan counts per status, native flag, configured paths |
-| GET | `/api/scans?status=&limit=` | list (default limit 500, max 5000), ordered by id |
+| GET | `/api/summary` | scan counts per status, `no_date` (scans to review with no date yet), native flag, configured paths |
+| GET | `/api/batches?limit=` | newest first: `{id, name, box_label, audience, created_at, scans, counts{status}, no_date, possible_rescans}` |
+| GET | `/api/batches/{id}` | one batch, same shape |
+| PATCH | `/api/batches/{id}` | batch-level label (below): fills empty fields on every scan still to review; `{..batch, updated, touched{date,places,events,tags,people}}` |
+| GET | `/api/scans?status=&batch_id=&limit=` | list (default limit 500, max 5000), ordered by id |
 | GET | `/api/scans/{id}` | one scan |
 | PATCH | `/api/scans/{id}` | update (see below) |
 | DELETE | `/api/scans/{id}` | delete a rejected scan's files + record; 409 unless rejected, unexported, and no correction history |
@@ -594,7 +603,7 @@ asset-count field name in `assets/statistics`'s response.
 | POST | `/api/immich/check` | start the read-only duplicate check in the background; 409 if disabled or already running |
 | GET | `/api/immich/check/status` | poll the running/last check → `{state, phase, message, stats, ...}` |
 
-**Scan JSON** = all scan columns except `ocr_lines`, plus `batch`, `box_label`, `has_back`, `export` (row or null) and
+**Scan JSON** = all scan columns except `ocr_lines`, plus `batch`, `batch_id`, `box_label`, `audience`, `has_back`, `export` (row or null) and
 `date {precision, year, month, day, season, circa, label, exif, approximate}`.
 
 **PATCH body** (all fields optional):
@@ -608,6 +617,13 @@ asset-count field name in `assets/statistics`'s response.
 }
 ```
 `keep_back` is forced to false when the scan has no back. Dates set through the API get `date_source = "manual"`.
+
+**Batch label body** (`PATCH /api/batches/{id}`, all optional): `audience`, `box_label`, `date_text` (blank leaves dates
+alone; 422 if not understood), `places`, `events`, `tags`, `people` (lists), `replace` (default false). With `replace`
+false the date is set only on scans whose date is unknown and list values are merged in (case-insensitive); with it
+true they overwrite. Only scans in `needs_review` are touched - approved and exported values are committed and already
+recorded as corrections. Dates set this way get `date_source = "batch"`, shown to the operator as
+"set on the whole batch".
 
 ---
 
@@ -674,9 +690,9 @@ The rules live in CLAUDE.md > **UI DESIGN SYSTEM** (direction: *Darkroom*). This
   (`#scan-immich-dup`, dashed until confirmed) and a manual flag toggle, mirroring **Flag duplicate**'s
   kept/removed/added pattern but recorded as the separate `immich_duplicate` correction field.
 - **Guide tour** (top bar **Guide**, shortcut `G`) - `banana/web/static/tour.js`, vendored **driver.js** 1.8.0 (MIT,
-  `static/vendor/driver/`, `SOURCE.txt`; confirmed to make no network requests of its own). A 14-step walkthrough of the
-  whole workflow (scan/ingest → queue → images → editor tools → text on back → date → description → chips →
-  approve/reject → export → learning → health → recap); steps whose control isn't on screen (no scanner configured, no
+  `static/vendor/driver/`, `SOURCE.txt`; confirmed to make no network requests of its own). A 16-step walkthrough of the
+  whole workflow (scan/ingest → status strip → queue → batch label → images → editor tools → text on back → date →
+  description → places/events/tags → approve/reject → export → learning → health → recap); steps whose control isn't on screen (no scanner configured, no
   scan in the queue) are filtered out, and the tour opens the first queued scan itself if the editor is empty so the
   editor-only steps always have something to point at.
   - Popover styling is token-only (`.driver-popover.photo-scanner-tour` in `app.css`; `--driver-popover-font-family` and
@@ -689,28 +705,65 @@ The rules live in CLAUDE.md > **UI DESIGN SYSTEM** (direction: *Darkroom*). This
     tour's first and last (center-screen) steps - Escape or Done from either of those silently skipped it. Removing the
     `driver-active` class happens on every exit path, so that's what marks `localStorage.tourCompleted` and refocuses
     the Guide button reliably.
-  - Tests: `tests/ui/test_ui_live.py::test_guide_tour_opens_steps_through_and_completes` (all 14 titles unique, Done sets
+  - Tests: `tests/ui/test_ui_live.py::test_guide_tour_opens_steps_through_and_completes` (all 16 titles unique, Done sets
     `tourCompleted` and refocuses Guide), `test_guide_tour_reopens_with_g_shortcut_and_closes_on_escape`,
     `test_guide_tour_at_400px`.
 - **Text on back rows:** the line (click to add to description), confidence %, **Fix** (inline input, Enter saves, Escape cancels),
   **Not text** / **Restore**, badges `fixed` (with the original crossed out) and `auto-fixed` (dictionary).
 
-- **Tabs:** status filter with counts (`/api/summary`).
-- **Top bar:**
-  - **System** indicator: a dot for the overall state from `/api/health` (polled every 30 s) with text "System OK" / "N warnings" / "N problems".
-    Clicking it opens the System health panel (every check with status and detail), which has Recheck and Close; Escape also closes it.
-  - Scanner status (online / offline / "Scanning, N pages").
-  - **After scan** dropdown (`Add to review queue` = `review`, `Leave in inbox` = `inbox`). The choice is remembered per browser; the default comes from config.
-  - **Scan feeder** is disabled while offline or scanning. Progress is polled every 1.5 s while a scan runs.
-  Scanner controls are hidden when `scanner.host` is empty.
-- **Queue:** thumbnail (160 px), id, date label, `dup?`, `back text` (back has content).
-- **No emojis or pictographic icons** anywhere in the UI; use text labels and CSS shapes (checked on `.html/.css/.js` files).
-- **Editor:** front/back previews, keep-back toggle, date field with live parse preview (150 ms debounce),
-  description, chip inputs, Save / Approve / Reject, export location.
-- Unsaved edits are saved automatically when switching scans or tabs, or before export. The browser warns on unload.
+- **Page structure** (`index.html`, top to bottom): top bar (brand, status tabs, the scan controls, **Ingest inbox**,
+  **Export approved**) > status strip > drawers (System health, Learning, Immich; mutually exclusive) > queue + main
+  area (the stage, the batch card, the editor) > utility bar (API docs, Windows download, account, Sign out).
+  `app.js` holds the queue and editor; `stage.js` the status strip, the stage, the batch card and the error table;
+  `tour.js` the guide. Startup runs on `DOMContentLoaded` so every script has loaded first.
+- **Tabs:** status filter with counts (`/api/summary`). An optional batch filter (`state.batchId`, set from the stage's
+  recent batches) narrows every tab to one batch and shows a removable chip in the queue head.
+- **Status strip** (`#status-strip`, always visible): **System** (dot + "System OK" / "N warnings" / "N problems" from
+  `/api/health`, polled every 30 s; opens the health drawer), scanner (online / offline / "Scanning, N photos" /
+  "Processing N photos"; hidden when no scanner is configured), **Folders** (ok / warning / "Folder problem" from the
+  inbox, archive, library and data checks), **Immich** (only when enabled: on / warning / unreachable) and jobs
+  ("No jobs running" / "1 job running: scanning, Immich check"). Every item is text plus a mark (`data-status`)
+  plus one of the three status colors - never color alone. Learning, Immich and Guide sit at its right end.
+- **The stage** (`#stage`, `data-stage`): one area that changes with state, shown whenever no scan is open, with one
+  primary action (`#stage-primary`) and at most one secondary. States: **idle** ("Load photos into the feeder.", the
+  feeder cap, recent batches from `/api/batches` with an Open button each; primary Scan feeder, or Ingest inbox when
+  no scanner is configured or it is offline), **scanning** (step list scan > crop > pair > read text > check rescans
+  with the current step highlighted, plain progress sentence; the scan can't be cancelled from the app and the stage
+  says so), **review** (scans in the list but none open: "Open first scan"), **export** (To review empty and approved
+  scans waiting: what goes where and as which tier; primary Export), **done** (after an export or an inbox scan:
+  where it went, counts, warnings; primary "Next batch"), **attention** (a failed scan, a partial export or an
+  unreachable API: what happened, what happened to the scans, what to do, then a copyable code; the primary action is
+  the one safe next step, never a dead end). The stage keeps its last outcome until the operator dismisses it or
+  starts the next scan/ingest.
+- **Error table** (`ERRORS` in `stage.js`): one map from code to wording (`title`, `scans`, `next`, optional action)
+  for `API_UNREACHABLE`, `SCAN_OFFLINE`, `SCAN_FAILED`, `SCAN_NO_PAGES`, `INGEST_FAILED`, `EXPORT_PARTIAL`,
+  `EXPORT_FAILED`, `FOLDER_PROBLEM`, `DATE_UNREADABLE`, `IMMICH_UNREACHABLE`, `IMMICH_CHECK_FAILED`, `REQUEST_FAILED`.
+  Failure toasts (`failToast`) read *what happened, what to do, [CODE]*; the attention stage shows the full version.
+- **Queue:** thumbnail (160 px), id, date label or "no date", `dup?`, `in Immich?`, `no back`, `back text`, `blank back`.
+  Rows are reconciled by id on every refresh (updated in place, added, removed, reordered) - the DOM is never rebuilt
+  on a poll, so selection, scroll and the stagger reveal (new rows only, `.fresh`) survive. **Exceptions only**
+  (`#exceptions-only`, remembered per browser) narrows the list to scans that need a decision: no date, possible
+  rescan, flagged, no back, blank back; Previous/Next and approve-then-advance follow the filtered list. The count
+  reads "N scans · M to decide". Unknown dates therefore always stay visible as a count and a filter, never silently
+  placed at the export day.
+- **Batch card** (`#batch-card`, above the editor): the scan's batch with a summary line (scans, to review, without a
+  date, possible rescans, box label, private / shared with family) and **Label whole batch**, which opens a form:
+  date as written (live "reads as" preview), who may see the batch (private default / family; switching to family
+  asks for confirmation and states that nothing is moved or shared yet), places, events, tags, box label, and
+  **Replace values the scans already have** (off by default: fill empty only). Apply saves the open scan first, calls
+  `PATCH /api/batches/{id}`, reports "date set on N scans, places added on M" and re-renders. Approved scans are
+  never changed.
+- **Editor:** front/back previews, keep-back toggle, date field with live parse preview (150 ms debounce) that also
+  names the date's source ("read from the back", "set on the whole batch", "typed by you") and its precision,
+  description, chips for places, events and tags, Save / Approve / Reject, export location. **People** sit in a
+  folded `<details>` below the main fields (Immich groups faces after import; naming a cluster once there is cheaper
+  than typing names per scan). The section opens by itself whenever the field has a saved or suggested value, so
+  nothing provisional is ever hidden.
+- Unsaved edits are saved automatically when switching scans or tabs, before export, and before a batch label. The browser warns on unload.
 - Keys: see **Keyboard** above.
 
-**[planned]** Duplicate resolver (side-by-side, pick keeper), bulk edit, OCR line boxes over the back, autocomplete from known names.
+**[planned]** Duplicate resolver (side-by-side, pick keeper), OCR line boxes over the back, autocomplete from known names,
+export as a background job with progress on the stage, cancel for a running scan.
 
 ---
 
@@ -795,6 +848,18 @@ Benchmark on a 5400×3600 JPEG (Core Ultra 9 275HX, WSL2):
   Volumes: `/mnt/photo_vault`, `/srv/banana`, `docker/config.toml` → `/etc/banana/config.toml`.
 - **Host:** NVIDIA driver, Docker, nvidia-container-toolkit, NFS mount of the Synology share.
 - **Dev:** WSL2 Ubuntu 24.04. `scripts/wsl_build.sh` rsyncs the Windows checkout to `~/Photo_Scanner_Banana`, builds and tests.
+- **Desktop build (Windows)** **[implemented]**: `scripts/photoscanner.spec` (PyInstaller one-folder, `scripts/desktop_launcher.py`
+  → `banana.desktop.main`), built and smoke-launched by `.github/workflows/desktop-build.yml`, published at
+  `GET /api/downloads/windows`. Config and data live under `%LOCALAPPDATA%\PhotoScanner\`; the generated config sets
+  `[auth] required = false` (one computer, one person, bound to 127.0.0.1). On every launch the config of an earlier install is kept, and only repaired where it would
+  break: a missing `[auth] required` is added, a dead `[exiftool] path` (the program folder moved) is pointed at the
+  bundled ExifTool, and the scanner address is refreshed by name. The app opens as **its own window**, not a
+  browser tab: the server runs in a background thread and a native window (pywebview over Edge WebView2, 1440×960, min
+  400×600, persistent storage so remembered choices survive relaunch) owns the main thread; closing the window ends the
+  app. Without pywebview/WebView2 it falls back to an Edge/Chrome `--app` window, then to the default browser
+  (`PHOTOSCANNER_BROWSER=1` forces the browser). Icon: the operator's scanner picture (`scripts/icon-source.png`);
+  `scripts/make_icon.py` turns it into `static/icon.ico` (the exe, the window title bar and taskbar) and
+  `static/icon.png` (favicon and brand mark).
 
 ---
 
@@ -825,7 +890,7 @@ Live dev server for watching changes: `scripts/dev_live.sh` (uvicorn `--reload` 
 | 1 Skeleton, native core | done |
 | 2 Export engine | done; **not yet verified in a real Immich instance** |
 | 3 Watcher, DINOv3 + FAISS, detector + TrOCR, GLiNER, benchmark on real backs | next (needs a sample scan batch) |
-| 4 Review UI | redesigned (cards, skeletons, bundled fonts); duplicate resolver and bulk edit pending |
+| 4 Review UI | state-driven stage, status strip, batch-level label, exceptions filter, error table (2026-10-31); duplicate resolver pending |
 | Learning loop 1–2 | correction capture, dictionary, threshold proposals: done |
 | Learning loop 3–4 | retraining and promotion gate: pending (needs correction data) |
 | 4b Immich read-only duplicate check (exact checksum + perceptual dHash) | done; route/param specifics **not yet verified against a real Immich server** |

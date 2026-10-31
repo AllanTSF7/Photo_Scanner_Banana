@@ -21,7 +21,7 @@ from banana import health as health_checks
 from banana.analysis import autocorrect
 from banana.analysis.date_parse import find_dates
 from banana.config import load_settings
-from banana.dates import PhotoDate
+from banana.dates import PhotoDate, Precision
 from banana.export.service import ManualDate
 from banana.ingest import thumbs
 from banana.export.service import scan_edit
@@ -60,6 +60,7 @@ immich_check = ImmichCheckController(engine, settings)
 #    sites. Non-browser clients send no Origin and are unaffected.
 #  - Everything except the public paths below needs a signed-in session.
 _PUBLIC_PATHS = {"/health", "/login", "/api/auth/login", "/api/auth/setup", "/api/auth/state", "/api/dev/reload-token"}
+LOCAL_USERNAME = "operator"  # who acts when sign-in is switched off ([auth] required = false)
 _UNSAFE_METHODS = {"POST", "PUT", "PATCH", "DELETE"}
 _API_PREFIXES = ("/api/", "/docs", "/redoc", "/openapi.json")
 _ALLOWED_HOSTS = {h.strip("[]").lower() for h in settings.auth.allowed_hosts}
@@ -82,6 +83,10 @@ async def security_gate(request: Request, call_next):
         if origin is not None and urlsplit(origin).netloc.lower() != host_header.lower():
             return PlainTextResponse("Cross-site request refused.", status_code=403)
     path = request.url.path
+    if not settings.auth.required:
+        # Single-computer desktop install: no accounts. The host and cross-site checks above still apply.
+        request.state.username = LOCAL_USERNAME
+        return await call_next(request)
     if path in _PUBLIC_PATHS or path.startswith("/static/"):
         return await call_next(request)
     with db.session(engine) as session:
@@ -120,7 +125,9 @@ def _scan_json(session: Session, scan: Scan) -> dict:
     data = scan.model_dump()
     data.update(
         batch=batch.name if batch else None,
+        batch_id=batch.id if batch else None,
         box_label=batch.box_label if batch else None,
+        audience=batch.audience if batch else None,
         date=_date_json(scan.photo_date()),
         has_back=scan.back_path is not None,
         export=export.model_dump() if export else None,
@@ -146,7 +153,9 @@ def index() -> FileResponse:
 
 
 @app.get("/login", include_in_schema=False)
-def login_page() -> FileResponse:
+def login_page() -> Response:
+    if not settings.auth.required:
+        return RedirectResponse("/", status_code=303)
     return FileResponse(STATIC / "login.html")
 
 
@@ -186,9 +195,13 @@ def _signed_in(response: Response, session: Session, user) -> dict:
 
 @app.get("/api/auth/state", tags=["auth"])
 def auth_state(request: Request, session: Session = Depends(get_session)) -> dict:
-    """Public: whether the first-account setup is open, and who (if anyone) this browser is signed in as."""
+    """Public: whether sign-in is required at all, whether the first-account setup is open, and who (if anyone)
+    this browser is signed in as."""
+    if not settings.auth.required:
+        return {"required": False, "setup_open": False, "username": LOCAL_USERNAME}
     user = auth.resolve_session(session, request.cookies.get(auth.COOKIE_NAME))
     return {
+        "required": True,
         "setup_open": settings.auth.setup_page and not auth.any_users(session),
         "username": user.username if user else None,
     }
@@ -208,8 +221,8 @@ def auth_login(body: Credentials, request: Request, response: Response, session:
 
 @app.post("/api/auth/setup", tags=["auth"])
 def auth_setup(body: Credentials, response: Response, session: Session = Depends(get_session)) -> dict:
-    """Create the first account. Only while setup is enabled in config and no account exists yet."""
-    if not settings.auth.setup_page or auth.any_users(session):
+    """Create the first account. Only while sign-in is required, setup is enabled in config and no account exists yet."""
+    if not settings.auth.required or not settings.auth.setup_page or auth.any_users(session):
         raise HTTPException(403, "Setup is closed. Ask an administrator to create your account.")
     try:
         user = auth.create_user(session, body.username, body.password)
@@ -237,12 +250,119 @@ def health() -> dict:
 
 @app.get("/api/summary", tags=["system"])
 def summary(session: Session = Depends(get_session)) -> dict:
-    counts = Counter(s.status for s in session.exec(select(Scan)))
+    all_scans = list(session.exec(select(Scan)))
+    counts = Counter(s.status for s in all_scans)
     return {
         "counts": {status.value: counts.get(status.value, 0) for status in ScanStatus},
+        # Photos with no date yet stay visible as a count, never silently placed at the export day.
+        "no_date": sum(
+            1 for s in all_scans
+            if s.status == ScanStatus.NEEDS_REVIEW.value and s.date_precision == Precision.UNKNOWN.value
+        ),
         "native_core": core.NATIVE_AVAILABLE,
         "paths": {k: str(v) for k, v in settings.paths},
     }
+
+
+# ---------------------------------------------------------------- batches (one stack from the feeder)
+
+AUDIENCES = ("private", "family")
+
+
+def _batch_json(session: Session, batch: Batch) -> dict:
+    scans = list(session.exec(select(Scan).where(Scan.batch_id == batch.id)))
+    counts = Counter(s.status for s in scans)
+    return {
+        "id": batch.id, "name": batch.name, "box_label": batch.box_label, "audience": batch.audience,
+        "created_at": batch.created_at, "scans": len(scans),
+        "counts": {status.value: counts.get(status.value, 0) for status in ScanStatus},
+        "no_date": sum(1 for s in scans if s.date_precision == Precision.UNKNOWN.value),
+        "possible_rescans": sum(1 for s in scans if s.duplicate_group_id or s.operator_duplicate),
+    }
+
+
+@app.get("/api/batches", tags=["batches"])
+def list_batches(limit: int = Query(20, le=500), session: Session = Depends(get_session)) -> list[dict]:
+    """Newest batch first, with per-status counts and how many scans still have no date."""
+    batches = session.exec(select(Batch).order_by(Batch.id.desc()).limit(limit))
+    return [_batch_json(session, b) for b in batches]
+
+
+@app.get("/api/batches/{batch_id}", tags=["batches"])
+def get_batch(batch_id: int, session: Session = Depends(get_session)) -> dict:
+    batch = session.get(Batch, batch_id)
+    if batch is None:
+        raise HTTPException(404, f"batch {batch_id} not found")
+    return _batch_json(session, batch)
+
+
+class BatchLabel(BaseModel):
+    """One label for a whole stack (the biggest time-saver in review). Fills only what is still empty unless
+    `replace` is set, and only touches scans still to review: approved and exported values are committed and
+    already recorded as corrections. The tier is decided per batch, never per photo and never from file names."""
+
+    audience: Literal["private", "family"] | None = None
+    box_label: str | None = None
+    date_text: str | None = None  # as written ("Summer 1979"); blank leaves dates alone
+    places: list[str] | None = None
+    events: list[str] | None = None
+    tags: list[str] | None = None
+    people: list[str] | None = None
+    replace: bool = False  # True: overwrite values the scans already have
+
+
+def _merge(current: list, incoming: list[str], replace: bool) -> list:
+    cleaned = [v.strip() for v in incoming if v and v.strip()]
+    base = [] if replace else list(current or [])
+    seen = {v.lower() for v in base}
+    for value in cleaned:
+        if value.lower() not in seen:
+            base.append(value)
+            seen.add(value.lower())
+    return base
+
+
+@app.patch("/api/batches/{batch_id}", tags=["batches"])
+def label_batch(batch_id: int, body: BatchLabel, session: Session = Depends(get_session)) -> dict:
+    batch = session.get(Batch, batch_id)
+    if batch is None:
+        raise HTTPException(404, f"batch {batch_id} not found")
+    if body.audience is not None:
+        batch.audience = body.audience
+    if body.box_label is not None:
+        batch.box_label = body.box_label.strip() or None
+    date = None
+    if body.date_text and body.date_text.strip():
+        found = find_dates(body.date_text.strip(), two_digit_year_pivot=settings.dates.two_digit_year_pivot)
+        if not found:
+            raise HTTPException(422, f"could not understand date {body.date_text.strip()!r}")
+        date = found[0].date
+
+    touched = {"date": 0, "places": 0, "events": 0, "tags": 0, "people": 0}
+    updated = 0
+    pending = session.exec(select(Scan).where(Scan.batch_id == batch.id, Scan.status == ScanStatus.NEEDS_REVIEW.value))
+    for scan in pending:
+        changed = False
+        if date is not None and (body.replace or scan.date_precision == Precision.UNKNOWN.value):
+            scan.set_photo_date(date, "batch")
+            touched["date"] += 1
+            changed = True
+        for field in ("places", "events", "tags", "people"):
+            incoming = getattr(body, field)
+            if not incoming:
+                continue
+            merged = _merge(getattr(scan, field), incoming, body.replace)
+            if merged != list(getattr(scan, field) or []):
+                setattr(scan, field, merged)
+                touched[field] += 1
+                changed = True
+        if changed:
+            scan.updated_at = utcnow()
+            session.add(scan)
+            updated += 1
+    session.add(batch)
+    session.commit()
+    return {**_batch_json(session, batch), "updated": updated, "touched": touched}
 
 
 @app.get("/api/scanner", tags=["scanner"])
@@ -400,11 +520,14 @@ def scan_progress() -> dict:
 
 @app.get("/api/scans", tags=["scans"])
 def list_scans(
-    status: str | None = None, limit: int = Query(500, le=5000), session: Session = Depends(get_session)
+    status: str | None = None, batch_id: int | None = None, limit: int = Query(500, le=5000),
+    session: Session = Depends(get_session),
 ) -> list[dict]:
     query = select(Scan).order_by(Scan.id).limit(limit)
     if status:
         query = query.where(Scan.status == status)
+    if batch_id is not None:
+        query = query.where(Scan.batch_id == batch_id)
     return [_scan_json(session, s) for s in session.exec(query)]
 
 

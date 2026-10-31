@@ -211,6 +211,21 @@ the UI means.
   results, thumbnails, or health checks land.
 - **Irreversible actions** (approve → export, apply a threshold proposal) get a
   distinct treatment and an explicit confirm. Reversible ones must not.
+- **One stage, one primary action.** The main area (`#stage`, `stage.js`) is a
+  single state-driven surface: idle / scanning / review / export / done /
+  attention, each with exactly one primary button. Never add a second main
+  area or a second primary action to a state.
+- **The status strip is always visible** and every item is text + mark +
+  colour (`data-status`), never colour alone.
+- **Errors follow one shape:** what happened, what happened to the scans, what
+  to do, then `[CODE]` from the single `ERRORS` table in `stage.js`. Every
+  error state has a next action; nothing dead-ends.
+- **Batch first, exceptions second.** A label that applies to a whole stack is
+  set once on the batch card; per-scan fields only cover the exceptions
+  (`Exceptions only` filter). People stay off the main path (folded) because
+  Immich groups faces after import.
+- **Polls never rebuild the DOM.** Queue rows, tabs and health rows are
+  reconciled by id and updated in place.
 
 ### Typography
 IBM Plex Sans for UI, IBM Plex Mono for filenames, EXIF values, batch IDs, OCR

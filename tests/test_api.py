@@ -395,7 +395,7 @@ def test_session_cookie_is_httponly_strict_and_only_its_hash_is_stored(client):
 
 def test_first_account_setup_is_closed_by_default(client):
     with _anonymous() as anon:
-        assert anon.get("/api/auth/state").json() == {"setup_open": False, "username": None}
+        assert anon.get("/api/auth/state").json() == {"required": True, "setup_open": False, "username": None}
         assert anon.post("/api/auth/setup", json={"username": "mallory", "password": "long enough pw"}).status_code == 403
 
 
@@ -560,3 +560,75 @@ def test_export_approved(client):
     assert by_id[scans["Attic3_0003"]["id"]]["back"] is None  # blank back not exported
     assert (root / "sorted" / f"{first['front']}.xmp").exists()
     assert c.get(f"/api/scans/{scans['Attic3_0001']['id']}").json()["export"]["front_rel"] == first["front"]
+
+
+def test_batches_list_and_batch_label_fill_empty_then_replace(client):
+    c, _ = client
+    assert c.get("/api/batches").json() == []
+    c.post("/api/ingest")
+    [batch] = c.get("/api/batches").json()
+    assert batch["scans"] == 7 and batch["counts"]["needs_review"] == 7 and batch["no_date"] == 7
+    assert batch["audience"] == "private"  # everything is private until a person promotes it
+    assert batch["possible_rescans"] == 1
+
+    scans = c.get("/api/scans?status=needs_review").json()
+    first = scans[0]["id"]
+    assert scans[0]["batch_id"] == batch["id"] and scans[0]["audience"] == "private"
+    assert c.get(f"/api/scans?batch_id={batch['id']}").json() and c.get("/api/scans?batch_id=999").json() == []
+    # One scan already has its own date and a place; an approved scan is never touched by a batch label.
+    c.patch(f"/api/scans/{first}", json={"date_text": "Xmas '84", "places": ["Chicago"]})
+    approved = scans[1]["id"]
+    c.patch(f"/api/scans/{approved}", json={"status": "approved"})
+
+    bad = c.patch(f"/api/batches/{batch['id']}", json={"date_text": "sometime"})
+    assert bad.status_code == 422
+
+    r = c.patch(f"/api/batches/{batch['id']}", json={
+        "date_text": "Summer 1979", "places": ["Lake Erie"], "events": ["Reunion"], "box_label": "Box 3",
+    }).json()
+    # 6 scans still to review: the one with its own date keeps it, every one gets the place and the event.
+    assert r["updated"] == 6 and r["touched"] == {"date": 5, "places": 6, "events": 6, "tags": 0, "people": 0}
+    assert r["box_label"] == "Box 3" and r["no_date"] == 1  # the approved scan still has none
+    own = c.get(f"/api/scans/{first}").json()
+    assert own["date"]["label"] == "1984-12-25" and own["places"] == ["Chicago", "Lake Erie"]  # filled, not replaced
+    other = c.get(f"/api/scans/{scans[2]['id']}").json()
+    assert other["date"]["label"] == "Summer 1979" and other["date_source"] == "batch"
+    assert c.get(f"/api/scans/{approved}").json()["places"] == []
+
+    r = c.patch(f"/api/batches/{batch['id']}", json={"date_text": "1980", "places": ["Lake Erie"], "replace": True}).json()
+    assert r["touched"]["date"] == 6 and r["touched"]["places"] == 1  # only the scan that had Chicago changes
+    assert c.get(f"/api/scans/{first}").json()["places"] == ["Lake Erie"]
+    assert c.get("/api/summary").json()["no_date"] == 0
+
+    assert c.patch(f"/api/batches/{batch['id']}", json={"audience": "family"}).json()["audience"] == "family"
+    assert c.patch(f"/api/batches/{batch['id']}", json={"audience": "public"}).status_code == 422
+    assert c.get(f"/api/batches/{batch['id']}").json()["audience"] == "family"
+    assert c.patch("/api/batches/999", json={}).status_code == 404
+
+
+def test_sign_in_can_be_switched_off_for_a_single_computer_install(tmp_path, monkeypatch):
+    """[auth] required = false (the desktop build's default): no accounts, no sign-in page, every route open to
+    this machine - while the host and cross-site checks stay on."""
+    for name in ("inbox", "archive", "sorted", "data"):
+        (tmp_path / name).mkdir()
+    config = tmp_path / "config.toml"
+    config.write_text(
+        "[paths]\n" + "".join(f'{n} = "{(tmp_path / n).as_posix()}"\n' for n in ("inbox", "archive", "sorted"))
+        + f'data_dir = "{(tmp_path / "data").as_posix()}"\n'
+        + '[auth]\nallowed_hosts = ["testserver"]\nrequired = false\nsetup_page = true\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("BANANA_CONFIG", str(config))
+    import banana.web.api as api
+
+    api = importlib.reload(api)
+    with TestClient(api.app) as c:
+        assert c.get("/api/scans").status_code == 200  # nobody signed in, nothing refused
+        assert c.get("/api/auth/state").json() == {"required": False, "setup_open": False, "username": "operator"}
+        assert c.get("/api/auth/me").json() == {"username": "operator"}
+        assert c.get("/", follow_redirects=False).status_code == 200
+        assert c.get("/login", follow_redirects=False).headers["location"] == "/"
+        assert c.post("/api/auth/setup", json={"username": "x", "password": "long enough pw"}).status_code == 403
+        assert c.post("/api/ingest").status_code == 200
+        assert c.get("/api/scans", headers={"Host": "evil.example"}).status_code == 400  # rebinding still blocked
+        assert c.post("/api/ingest", headers={"Origin": "http://evil.example"}).status_code == 403  # CSRF still blocked

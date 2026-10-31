@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+from pathlib import Path
 import sys
 
 import pytest
@@ -137,12 +138,13 @@ def test_older_configs_without_auth_get_setup_added_but_operator_auth_is_left_al
     old = tmp_path / "old.toml"
     old.write_text('[paths]\ninbox = "x"\n[scanner]\nhost = ""\n', encoding="utf-8")
     mod._ensure_auth_section(old)
-    assert tomllib.loads(old.read_text(encoding="utf-8"))["auth"]["setup_page"] is True
+    assert tomllib.loads(old.read_text(encoding="utf-8"))["auth"] == {"required": False, "setup_page": True}
 
+    # An [auth] the operator wrote keeps every value; only the missing `required` is filled in (desktop = no sign-in).
     mine = tmp_path / "mine.toml"
     mine.write_text('[auth]\nsetup_page = false\n', encoding="utf-8")
     mod._ensure_auth_section(mine)
-    assert mine.read_text(encoding="utf-8") == '[auth]\nsetup_page = false\n'
+    assert mine.read_text(encoding="utf-8") == '[auth]\nrequired = false\nsetup_page = false\n'
 
 
 def test_set_scanner_host_adds_a_scanner_section_when_missing():
@@ -168,3 +170,160 @@ def test_ensure_config_falls_back_to_path_exiftool_when_not_bundled(tmp_path, mo
     mod = _reload_with_env(monkeypatch, tmp_path)
     text = mod._ensure_config(tmp_path / "app").read_text(encoding="utf-8")
     assert 'path = "exiftool"' in text
+
+
+def test_new_desktop_configs_switch_sign_in_off(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    text = mod._ensure_config(tmp_path / "app").read_text(encoding="utf-8")
+    from banana.config import Settings
+
+    settings = Settings.model_validate(__import__("tomllib").loads(text))
+    assert settings.auth.required is False  # one computer, one person: no accounts
+
+
+def test_older_desktop_configs_get_required_false_added_unless_the_operator_chose(tmp_path, monkeypatch):
+    import tomllib
+
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    config = tmp_path / "config.toml"
+    config.write_text('[paths]\ninbox = "x"\n\n[auth]\nsetup_page = true\nsession_days = 7\n', encoding="utf-8")
+    mod._ensure_auth_section(config)
+    data = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert data["auth"] == {"required": False, "setup_page": True, "session_days": 7}
+
+    config.write_text('[auth]\nrequired = true\n', encoding="utf-8")
+    mod._ensure_auth_section(config)
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["auth"] == {"required": True}  # the operator's choice stays
+
+
+def test_native_window_is_skipped_without_pywebview_or_when_the_browser_is_forced(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    monkeypatch.setitem(sys.modules, "webview", None)  # import fails
+    assert mod._run_native_window("http://127.0.0.1:1/") is False
+
+    calls = []
+    fake = type("webview", (), {"create_window": lambda *a, **k: calls.append(("create", a, k)),
+                                "start": lambda *a, **k: calls.append(("start", a, k))})
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setenv("PHOTOSCANNER_BROWSER", "1")
+    assert mod._run_native_window("http://127.0.0.1:1/") is False
+    assert calls == []
+
+
+def test_native_window_runs_pywebview_with_persistent_storage(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("PHOTOSCANNER_BROWSER", raising=False)
+    calls = []
+    fake = type("webview", (), {"create_window": lambda *a, **k: calls.append(("create", a, k)),
+                                "start": lambda *a, **k: calls.append(("start", a, k))})
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    assert mod._run_native_window("http://127.0.0.1:1/") is True
+    (create, start) = calls
+    assert create[1][:2] == ("Photo Scanner", "http://127.0.0.1:1/")
+    assert create[2]["min_size"] == (400, 600)
+    assert start[2]["private_mode"] is False  # sign-in cookie and remembered choices survive a relaunch
+    assert start[2]["storage_path"].startswith(str(mod._data_home()))
+    assert start[2]["icon"].endswith("icon.ico") and Path(start[2]["icon"]).exists()  # the window wears the app icon, not Python's
+
+
+def test_native_window_failure_falls_back_instead_of_crashing(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("PHOTOSCANNER_BROWSER", raising=False)
+
+    def boom(*a, **k):
+        raise RuntimeError("no WebView2 runtime")
+
+    monkeypatch.setitem(sys.modules, "webview", type("webview", (), {"create_window": boom, "start": boom}))
+    assert mod._run_native_window("http://127.0.0.1:1/") is False
+
+
+def test_browser_fallback_prefers_an_app_mode_window(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("PHOTOSCANNER_BROWSER", raising=False)
+    launched, opened = [], []
+    monkeypatch.setattr(mod, "_app_mode_browser", lambda: r"C:\edge\msedge.exe")
+    monkeypatch.setattr(mod.subprocess, "Popen", lambda args, **k: launched.append(args))
+    monkeypatch.setattr(mod.webbrowser, "open", lambda url: opened.append(url))
+    assert mod._show_in_browser("http://127.0.0.1:1/") == "app"
+    assert launched == [[r"C:\edge\msedge.exe", "--app=http://127.0.0.1:1/", "--window-size=1440,960"]]
+    assert opened == []
+
+    monkeypatch.setattr(mod, "_app_mode_browser", lambda: None)
+    assert mod._show_in_browser("http://127.0.0.1:1/") == "browser"
+    assert opened == ["http://127.0.0.1:1/"]
+
+    monkeypatch.setattr(mod, "_app_mode_browser", lambda: r"C:\edge\msedge.exe")
+    monkeypatch.setenv("PHOTOSCANNER_BROWSER", "1")
+    assert mod._show_in_browser("http://127.0.0.1:1/") == "browser"
+
+
+def test_app_mode_browser_finds_edge_under_program_files(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    edge = tmp_path / "pf" / "Microsoft" / "Edge" / "Application" / "msedge.exe"
+    edge.parent.mkdir(parents=True)
+    edge.write_bytes(b"")
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "pf"))
+    monkeypatch.setenv("PROGRAMFILES", str(tmp_path / "nothing"))
+    assert mod._app_mode_browser() == str(edge)
+    monkeypatch.setenv("PROGRAMFILES(X86)", str(tmp_path / "nothing"))
+    monkeypatch.setattr(mod.shutil, "which", lambda name: None)
+    assert mod._app_mode_browser() is None
+
+
+def test_wait_ready_gives_up_when_the_server_thread_dies(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(mod, "_port_open", lambda host, port: False)
+    assert mod._wait_ready("127.0.0.1", 1, alive=lambda: False, timeout=5) is False
+    monkeypatch.setattr(mod, "_port_open", lambda host, port: True)
+    assert mod._wait_ready("127.0.0.1", 1) is True
+
+
+def test_dead_exiftool_path_from_a_moved_install_is_repointed_at_the_bundled_copy(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    import tomllib
+
+    app = tmp_path / "new-program-folder"
+    bundled = app / "tools" / "exiftool" / "exiftool.exe"
+    bundled.parent.mkdir(parents=True)
+    bundled.write_bytes(b"")
+    config = tmp_path / "config.toml"
+    config.write_text(
+        '[paths]\ninbox = "x"\n\n[exiftool]\n# where the old install kept it\n'
+        'path = "C:/Old/PhotoScanner/_internal/tools/exiftool/exiftool.exe"\n\n[scanner]\nhost = ""\n',
+        encoding="utf-8",
+    )
+    assert mod._ensure_exiftool_path(config, app) == bundled.as_posix()
+    parsed = tomllib.loads(config.read_text(encoding="utf-8"))
+    assert parsed["exiftool"]["path"] == bundled.as_posix()
+    assert parsed["paths"] == {"inbox": "x"} and parsed["scanner"] == {"host": ""}  # nothing else touched
+    assert "# where the old install kept it" in config.read_text(encoding="utf-8")
+
+    # Second launch: the path now resolves, so it is left alone.
+    assert mod._ensure_exiftool_path(config, app) is None
+
+
+def test_a_working_exiftool_path_or_command_is_left_alone(tmp_path, monkeypatch):
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    app = tmp_path / "program"
+    (app / "tools" / "exiftool").mkdir(parents=True)
+    (app / "tools" / "exiftool" / "exiftool.exe").write_bytes(b"")
+
+    own = tmp_path / "my-exiftool.exe"
+    own.write_bytes(b"")
+    config = tmp_path / "config.toml"
+    config.write_text(f'[exiftool]\npath = "{own.as_posix()}"\n', encoding="utf-8")
+    assert mod._ensure_exiftool_path(config, app) is None
+
+    monkeypatch.setattr(mod.shutil, "which", lambda name: str(own) if name == "exiftool" else None)
+    config.write_text('[exiftool]\npath = "exiftool"\n', encoding="utf-8")
+    assert mod._ensure_exiftool_path(config, app) is None
+    assert config.read_text(encoding="utf-8") == '[exiftool]\npath = "exiftool"\n'
+
+    # A config with no [exiftool] section at all (the server default) gets one pointing at the bundled copy.
+    config.write_text('[paths]\ninbox = "x"\n', encoding="utf-8")
+    assert mod._ensure_exiftool_path(config, app) is not None
+    assert "[exiftool]" in config.read_text(encoding="utf-8")
+
+    # No bundled ExifTool (a source checkout): never touched.
+    config.write_text('[exiftool]\npath = "C:/nowhere/exiftool.exe"\n', encoding="utf-8")
+    assert mod._ensure_exiftool_path(config, tmp_path / "no-such-app") is None

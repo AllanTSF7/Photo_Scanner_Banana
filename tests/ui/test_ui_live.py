@@ -35,6 +35,19 @@ for n in range(1, 5):
 """
 
 
+def _fake_scanimage(root: Path) -> Path:
+    """A stand-in for SANE's scanimage that writes four pages. On Windows a shebang script isn't executable, so the
+    config points at a .cmd wrapper around the same Python script; the backend is pinned to "sane" either way."""
+    script = root / "fake_scanimage.py"
+    script.write_text(FAKE_SCANIMAGE.format(python=sys.executable))
+    if sys.platform == "win32":
+        wrapper = root / "scanimage.cmd"
+        wrapper.write_text(f'@"{sys.executable}" "{script}" %*\n')
+        return wrapper
+    script.chmod(script.stat().st_mode | stat.S_IEXEC)
+    return script
+
+
 def _free_port() -> int:
     with socket.socket() as s:
         s.bind(("127.0.0.1", 0))
@@ -74,9 +87,7 @@ def server(tmp_path, read_text):
     for name in ("inbox", "archive", "sorted", "data"):
         (tmp_path / name).mkdir()
     make_demo_inbox.main(tmp_path / "inbox")
-    scanimage = tmp_path / "scanimage"
-    scanimage.write_text(FAKE_SCANIMAGE.format(python=sys.executable))
-    scanimage.chmod(scanimage.stat().st_mode | stat.S_IEXEC)
+    scanimage = _fake_scanimage(tmp_path)
     fake_port = _FakeScannerPort()
 
     config = tmp_path / "config.toml"
@@ -85,7 +96,7 @@ def server(tmp_path, read_text):
         + "".join(f'{n} = "{(tmp_path / n).as_posix()}"\n' for n in ("inbox", "archive", "sorted", "data")).replace(
             "data =", "data_dir ="
         )
-        + f'[scanner]\nhost = "127.0.0.1"\nport = {fake_port.port}\nscanimage = "{scanimage.as_posix()}"\n'
+        + f'[scanner]\nhost = "127.0.0.1"\nport = {fake_port.port}\nscanimage = "{scanimage.as_posix()}"\nbackend = "sane"\n'
         + f"[analysis]\nread_text = {'true' if read_text else 'false'}\n",
         encoding="utf-8",
     )
@@ -162,6 +173,14 @@ def ingest(pg, count=7):
 
 def no_horizontal_scroll(pg) -> bool:
     return pg.evaluate("document.scrollingElement.scrollWidth <= window.innerWidth + 1")
+
+
+def open_people(pg):
+    """People sit folded below the main fields (Immich groups faces after import); open the section to type in it."""
+    details = pg.locator("#more-fields")
+    if details.get_attribute("open") is None:
+        details.locator("summary").click()
+    expect(details).to_have_attribute("open", "")
 
 
 # ---------------------------------------------------------------- layout
@@ -254,6 +273,7 @@ def test_description_and_chip_inputs(page):
 
     page.fill("#description", "a quiet afternoon outside")  # no names: this test drives the chip inputs by hand
     expect(page.locator("#description")).to_have_value("a quiet afternoon outside")
+    open_people(page)
 
     for field in ("people", "places", "events", "tags"):
         box = page.locator(f'.chips-input[data-field="{field}"]')
@@ -291,6 +311,7 @@ def test_description_and_chip_inputs(page):
 def test_chip_added_on_blur_and_ctrl_s_saves(page):
     ingest(page)
     page.locator("#scan-list li").first.click()
+    open_people(page)
     box = page.locator('.chips-input[data-field="people"]')
     box.locator("input").type("Blurred")
     page.click("#description")
@@ -670,6 +691,7 @@ def test_people_places_events_derived_from_description(page):
 def test_filled_fields_get_suggestion_chips_not_overwrites(page):
     ingest(page)
     page.locator("#scan-list li").first.click()
+    open_people(page)
     box = page.locator('.chips-input[data-field="people"]')
     box.locator("input").type("Grandpa Joe")
     box.locator("input").press("Enter")
@@ -922,7 +944,7 @@ def test_guide_tour_opens_steps_through_and_completes(page):
 
     next_button = popover.locator(".driver-popover-next-btn")
     seen_titles = [popover.locator(".driver-popover-title").inner_text()]
-    for _ in range(13):  # 14 steps total: 1 already shown, 13 more clicks reach the last ("That's the loop")
+    for _ in range(15):  # 16 steps total: 1 already shown, 15 more clicks reach the last ("That's the loop")
         next_button.click()
         seen_titles.append(popover.locator(".driver-popover-title").inner_text())
     expect(popover.locator(".driver-popover-title")).to_have_text("That's the loop")
@@ -1304,3 +1326,210 @@ def test_sign_in_page_wrong_password_then_sign_in_and_sign_out_at_400px(browser,
     pg.goto(server["base"] + "/")
     expect(pg).to_have_url(server["base"] + "/login")  # the session really ended
     context.close()
+
+
+# ---------------------------------------------------------------- status strip, stage, batch label, exceptions filter
+
+
+def test_status_strip_and_idle_stage(page):
+    strip = page.locator("#status-strip")
+    expect(strip).to_be_visible()
+    expect(page.locator("#health-text")).to_have_text(re.compile(r"^(System OK|\d+ warnings?)$"))  # no problems
+    expect(page.locator("#scanner-status")).to_have_text("Scanner online")
+    expect(page.locator("#folders-status")).to_have_attribute("data-status", "ok")
+    expect(page.locator("#folders-status")).to_have_text("Folders OK")
+    expect(page.locator("#immich-status")).to_be_hidden()  # only when enabled
+    expect(page.locator("#jobs-status")).to_have_text("No jobs running")
+
+    stage = page.locator("#stage")
+    expect(stage).to_be_visible()
+    expect(stage).to_have_attribute("data-stage", "idle")
+    expect(page.locator("#stage-title")).to_have_text("Load photos into the feeder.")
+    expect(page.locator("#stage-body")).to_contain_text("Up to 36 prints")
+    expect(page.locator("#stage-detail")).to_contain_text("No batches yet.")
+    expect(page.locator("#stage-primary")).to_have_text("Scan feeder")
+    expect(page.locator("#stage-secondary")).to_have_text("Ingest inbox")
+
+    page.click("#stage-secondary")  # the stage's actions drive the real buttons
+    expect(toast(page)).to_contain_text("Ingested 7 scan(s)")
+    expect(page.locator("#editor")).to_be_visible()
+    expect(stage).to_be_hidden()
+
+
+def test_stage_scanning_shows_steps_then_review(page):
+    page.click("#stage-primary")  # Scan feeder
+    expect(page.locator("#jobs-status")).to_contain_text("running", timeout=10000)
+    expect(toast(page)).to_contain_text("Scanned 2 photo(s), 4 page(s)", timeout=20000)
+    expect(page.locator("#jobs-status")).to_have_text("No jobs running")
+    expect(page.locator("#editor")).to_be_visible()
+    expect(page.locator("#scan-list li")).to_have_count(9)
+
+
+def test_stage_export_ready_then_done(page, server):
+    ingest(page)
+    for scan in page.request.get(server["base"] + "/api/scans").json():
+        page.request.patch(server["base"] + f"/api/scans/{scan['id']}", data={"date_text": "1979", "status": "approved"})
+    page.locator(".tab", has_text="To review").click()
+    stage = page.locator("#stage")
+    expect(stage).to_have_attribute("data-stage", "export")
+    expect(page.locator("#stage-title")).to_have_text("7 approved scans ready to export.")
+    expect(page.locator("#stage-primary")).to_have_text("Export 7 scans")
+
+    page.click("#stage-primary")
+    expect(page.locator("#confirm-title")).to_have_text("Export 7 approved scans?")
+    page.click("#confirm-ok")
+    expect(toast(page)).to_contain_text("Exported 7 scan(s)")
+    expect(stage).to_have_attribute("data-stage", "done")
+    expect(page.locator("#stage-title")).to_have_text("Exported 7 scans.")
+    expect(page.locator("#stage-detail")).to_contain_text("SCAN_000001_A.jpg")
+    expect(page.locator("#stage-primary")).to_have_text("Next batch: scan feeder")
+    page.click("#stage-secondary")  # Show exported scans
+    expect(page.locator(".tab.active")).to_contain_text("Exported")
+    expect(page.locator("#scan-list li")).to_have_count(7)
+
+
+def test_stage_needs_attention_after_failed_scan(page):
+    page.route("**/api/scanner/scan", lambda route: route.fulfill(json={
+        "state": "failed", "phase": None, "destination": "review", "pages": 0, "message": "The scanner returned no pages."})
+        if route.request.method == "GET" else route.fulfill(json={"state": "scanning"}))
+    page.click("#btn-scan")
+    expect(toast(page)).to_contain_text("[SCAN_NO_PAGES]", timeout=10000)  # toast and stage agree on the code
+    stage = page.locator("#stage")
+    expect(stage).to_have_attribute("data-stage", "attention")
+    expect(page.locator("#stage-title")).to_have_text("The scanner returned no pages.")
+    expect(page.locator("#stage-detail")).to_contain_text("Nothing changed.")
+    expect(page.locator("#stage-code-text")).to_have_text("SCAN_NO_PAGES")
+    expect(page.locator("#btn-stage-copy")).to_be_enabled()
+    expect(page.locator("#stage-primary")).to_have_text("Scan feeder")  # never a dead end
+    page.click("#stage-secondary")  # Dismiss
+    expect(stage).to_have_attribute("data-stage", "idle")
+
+
+def test_exceptions_only_filter(page, server):
+    ingest(page)
+    expect(page.locator("#queue-count")).to_have_text("7 scans · 7 to decide")  # none has a date yet
+    for scan in page.request.get(server["base"] + "/api/scans").json():
+        page.request.patch(server["base"] + f"/api/scans/{scan['id']}", data={"date_text": "1979"})
+    page.locator(".tab", has_text="To review").click()
+    expect(page.locator("#queue-count")).to_have_text("7 scans · 3 to decide")  # blank back, no back, possible rescan
+    page.check("#exceptions-only")
+    rows = page.locator("#scan-list li")
+    expect(rows).to_have_count(3)
+    expect(page.locator("#queue-count")).to_have_text("3 of 7 scans")
+    expect(page.locator("#scan-list .chip", has_text="blank back")).to_have_count(1)
+    expect(page.locator("#scan-list .chip", has_text="no back")).to_have_count(1)
+    expect(page.locator("#scan-list .chip", has_text="dup?")).to_have_count(1)
+    expect(page.locator("#scan-title")).to_have_text("Scan #000003")  # the open scan left the list: first exception opens
+    page.click("#btn-next")  # navigation follows the filtered list
+    expect(page.locator("#scan-title")).to_have_text("Scan #000004")
+    page.reload()
+    expect(page.locator("#exceptions-only")).to_be_checked()  # remembered
+    page.uncheck("#exceptions-only")
+    expect(rows).to_have_count(7)
+
+
+def test_batch_label_fills_empty_fields_and_records_the_tier(page):
+    ingest(page)
+    page.locator("#scan-list li").first.click()
+    card = page.locator("#batch-card")
+    expect(card).to_be_visible()
+    expect(page.locator("#batch-summary")).to_contain_text("7 scans · 7 to review · 7 without a date")
+    expect(page.locator("#batch-summary")).to_contain_text("private")
+    expect(page.locator("#batch-form")).to_be_hidden()
+
+    page.fill("#date-text", "Xmas '84")  # this scan's own date must survive a batch label
+    page.click("#btn-batch-toggle")
+    expect(page.locator("#batch-form")).to_be_visible()
+    expect(page.locator("#batch-date")).to_be_focused()
+    page.fill("#batch-date", "Summer 1979")
+    expect(page.locator("#batch-date-preview")).to_contain_text("Summer 1979")
+    page.fill("#batch-places", "Lake Erie")
+    page.fill("#batch-events", "Reunion")
+    expect(page.locator("#btn-batch-apply")).to_have_text("Apply to 7 scans")
+    page.click("#btn-batch-apply")
+    expect(toast(page)).to_contain_text("date set on 6 scans, places added on 7, events added on 7")
+    expect(page.locator("#date-text")).to_have_value("1984-12-25")
+    expect(page.locator('.chips-input[data-field="places"] .chip')).to_have_text(["Lake Erie×"])
+    expect(page.locator("#batch-summary")).not_to_contain_text("without a date")
+
+    page.locator("#scan-list li", has_text="#000002").click()
+    expect(page.locator("#date-text")).to_have_value("Summer 1979")
+    expect(page.locator("#date-preview")).to_contain_text("set on the whole batch")
+
+    expect(page.locator("#batch-form")).to_be_visible()  # stays open for the next label
+    page.select_option("#batch-audience", "family")
+    page.click("#btn-batch-apply")
+    expect(page.locator("#confirm-title")).to_have_text("Mark this batch for the family?")
+    page.click("#confirm-cancel")  # cancelling keeps it private
+    expect(page.locator("#batch-audience")).to_have_value("private")
+    page.select_option("#batch-audience", "family")
+    page.click("#btn-batch-apply")
+    page.click("#confirm-ok")
+    expect(toast(page)).to_contain_text("Batch saved")
+    expect(page.locator("#batch-summary")).to_contain_text("shared with family")
+
+
+def test_batch_label_and_filter_at_400px(browser, server):
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    assert no_horizontal_scroll(pg), "status strip or stage scrolls sideways at 400px"
+    for selector in ("#status-strip", "#stage-primary", "#btn-guide", "#btn-learning"):
+        pg.locator(selector).scroll_into_view_if_needed()
+        expect(pg.locator(selector)).to_be_visible()
+    ingest(pg)
+    pg.locator("#scan-list li").first.click()
+    pg.check("#exceptions-only")
+    pg.click("#btn-batch-toggle")
+    for selector in ("#batch-date", "#batch-audience", "#batch-places", "#batch-events", "#batch-tags", "#batch-box",
+                     "#batch-replace", "#btn-batch-apply", "#more-fields summary"):
+        pg.locator(selector).scroll_into_view_if_needed()
+        expect(pg.locator(selector)).to_be_visible()
+    assert no_horizontal_scroll(pg), "batch form causes horizontal scroll at 400px"
+    context.close()
+
+
+def test_people_are_folded_until_they_have_content(page):
+    ingest(page)
+    page.locator("#scan-list li").first.click()
+    details = page.locator("#more-fields")
+    expect(details).not_to_have_attribute("open", "")
+    expect(page.locator('.chips-input[data-field="people"]')).to_be_hidden()
+    details.locator("summary").click()
+    box = page.locator('.chips-input[data-field="people"]')
+    expect(box).to_be_visible()
+    box.locator("input").type("Aunt Sue")
+    box.locator("input").press("Enter")
+    page.click("#form button[type=submit]")
+    expect(toast(page)).to_have_text("Saved")
+    page.locator("#scan-list li", has_text="#000002").click()
+    expect(details).not_to_have_attribute("open", "")  # nothing to show here
+    page.locator("#scan-list li", has_text="#000001").click()
+    expect(details).to_have_attribute("open", "")  # a saved name is never hidden
+    expect(box.locator(".chip")).to_have_text(["Aunt Sue×"])
+
+
+def test_recent_batches_open_one_batch(page, server):
+    ingest(page)
+    for scan in page.request.get(server["base"] + "/api/scans").json():
+        page.request.patch(server["base"] + f"/api/scans/{scan['id']}", data={"status": "rejected"})
+    page.locator(".tab", has_text="To review").click()
+    expect(page.locator("#stage")).to_have_attribute("data-stage", "idle")
+    batches = page.locator("#stage-detail .recent-batches li")
+    expect(batches).to_have_count(1)
+    expect(batches.first).to_contain_text("7 scans")
+    batches.first.locator("button").click()
+    expect(page.locator(".tab.active")).to_contain_text("All")
+    expect(page.locator("#queue-batch-filter")).to_contain_text("batch inbox-")
+    expect(page.locator("#scan-list li")).to_have_count(7)
+    page.click("#queue-batch-filter")
+    expect(page.locator("#queue-batch-filter")).to_have_count(0)
+
+
+def test_utility_bar_links_and_sign_out_button(page):
+    bar = page.locator(".utility-bar")
+    expect(bar).to_be_visible()
+    expect(bar.locator("a", has_text="API docs")).to_have_attribute("href", "/docs")
+    expect(bar.locator("#link-download-windows")).to_have_attribute("href", "/api/downloads/windows")
+    expect(bar.locator("#user-chip")).to_have_text(UI_USER)
+    expect(bar.locator("#btn-logout")).to_be_enabled()

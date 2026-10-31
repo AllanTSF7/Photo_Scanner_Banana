@@ -93,6 +93,10 @@ class AuthConfig(BaseModel):
     # Host headers the app answers to. Anything else is refused, which blocks DNS-rebinding attacks from a
     # web page. Add the server's Tailscale IP and name here on the server.
     allowed_hosts: list[str] = ["127.0.0.1", "localhost", "::1"]
+    # Whether every page and API call needs a signed-in session. The packaged desktop build turns this off:
+    # one computer, one person, bound to 127.0.0.1. Leave it on for anything reachable from other machines.
+    # The host and cross-site checks above stay on either way.
+    required: bool = True
     session_days: int = 30
     # A first-run "create the first account" page, open only while no account exists. Desktop builds turn it
     # on (loopback on a personal PC); on a shared server leave it off and use `banana user add`.

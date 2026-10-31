@@ -1,9 +1,12 @@
 "use strict";
-/* Photo Scanner review UI. Rules: CLAUDE.md > UI DESIGN SYSTEM.
+/* Photo Scanner review UI: the queue and the scan editor. Rules: CLAUDE.md > UI DESIGN SYSTEM.
    - Every action has a visible labeled control; shortcuts are declared with data-shortcut on that control.
    - Suggested values carry data-state="suggested" until the operator commits them (edit or approve).
-   - An async refresh never replaces a field that has focus or uncommitted input.
-   - Irreversible actions (export, apply threshold) ask for confirmation. */
+   - An async refresh never replaces a field that has focus or uncommitted input, and never rebuilds the queue DOM:
+     rows are updated in place by id, so selection, scroll and focus survive every poll.
+   - Irreversible actions (export, apply threshold, delete) ask for confirmation.
+   The status strip, the state-driven stage, the batch-level label and the error wording live in stage.js;
+   the guided tour in tour.js. Startup runs on DOMContentLoaded, after every script has loaded. */
 
 const STATUSES = [
   ["needs_review", "To review"],
@@ -18,8 +21,12 @@ const COMMITTED = ["approved", "exported", "stacked"];
 
 const state = {
   status: "needs_review",
-  scans: [],
+  batchId: null, // optional queue filter: one batch only (set from the stage's recent batches)
+  scans: [], // everything the current tab holds
+  visible: [], // what the queue shows (exceptions filter applied); navigation uses this list
+  exceptionsOnly: false,
   counts: {},
+  noDate: 0,
   selectedId: null,
   dirty: false,
   current: null, // last scan object shown in the editor
@@ -28,11 +35,16 @@ const state = {
 const $ = (id) => document.getElementById(id);
 
 async function api(method, url, body) {
-  const res = await fetch(url, {
-    method,
-    headers: body ? { "Content-Type": "application/json" } : {},
-    body: body ? JSON.stringify(body) : undefined,
-  });
+  let res;
+  try {
+    res = await fetch(url, {
+      method,
+      headers: body ? { "Content-Type": "application/json" } : {},
+      body: body ? JSON.stringify(body) : undefined,
+    });
+  } catch (err) {
+    throw Object.assign(new Error("The app's server is not responding."), { code: "API_UNREACHABLE", cause: err });
+  }
   if (res.status === 401) {  // session expired or signed out elsewhere
     location.replace("/login");
     throw new Error("Signed out");
@@ -40,7 +52,8 @@ async function api(method, url, body) {
   if (!res.ok) {
     let detail = res.statusText;
     try { detail = (await res.json()).detail ?? detail; } catch { /* not JSON */ }
-    throw new Error(typeof detail === "string" ? detail : JSON.stringify(detail));
+    const message = typeof detail === "string" ? detail : JSON.stringify(detail);
+    throw Object.assign(new Error(message), { status: res.status });
   }
   return res.json();
 }
@@ -54,10 +67,16 @@ function toast(message, isError = false) {
   clearTimeout(toastTimer);
   toastTimer = setTimeout(() => (el.hidden = true), isError ? 6000 : 3000);
 }
+/** Failure toast in the house style: what happened, then what to do, then the code (stage.js owns the table). */
+function failToast(err) {
+  toast(typeof explainError === "function" ? explainError(err) : err.message, true);
+}
 
 const statusLabel = (s) => (STATUSES.find(([k]) => k === s) || [s, s])[1];
 const isCommitted = (scan) => COMMITTED.includes(scan?.status);
 const sameValue = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+const padId = (id) => String(id).padStart(6, "0");
+const plural = (n, word) => `${n} ${word}${n === 1 ? "" : "s"}`;
 
 function escapeHtml(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
@@ -184,6 +203,7 @@ function chipsInput(container, field) {
         return chip;
       }),
     );
+    container.dispatchEvent(new CustomEvent("chips-rendered", { detail: { field, count: values.length + pending.length } }));
   };
   const commit = () => {
     const parts = input.value.split(",").map((s) => s.trim()).filter(Boolean);
@@ -239,6 +259,11 @@ function chipsInput(container, field) {
 const chips = Object.fromEntries(
   [...document.querySelectorAll(".chips-input")].map((el) => [el.dataset.field, chipsInput(el, el.dataset.field)]),
 );
+// People sit off the main path (Immich groups faces after import). The section opens by itself whenever it has
+// something to show, so a suggested or saved value is never hidden from the operator.
+document.querySelector('.chips-input[data-field="people"]').addEventListener("chips-rendered", (e) => {
+  if (e.detail.count > 0) $("more-fields").open = true;
+});
 
 // ---------- people / places / events suggested from the description ----------
 let deriveTimer;
@@ -271,19 +296,28 @@ function scheduleDerive(delay = 400) {
 
 // ---------- queue ----------
 async function loadSummary() {
-  const { counts } = await api("GET", "/api/summary");
-  state.counts = counts;
-  const total = Object.values(counts).reduce((a, b) => a + b, 0);
-  $("tabs").replaceChildren(
-    ...STATUSES.map(([key, label]) => {
-      const b = document.createElement("button");
-      b.className = "tab" + (key === state.status ? " active" : "");
-      b.setAttribute("aria-pressed", String(key === state.status));
-      b.innerHTML = `${label}<span class="count">${key ? counts[key] ?? 0 : total}</span>`;
+  const data = await api("GET", "/api/summary");
+  state.counts = data.counts;
+  state.noDate = data.no_date ?? 0;
+  const total = Object.values(data.counts).reduce((a, b) => a + b, 0);
+  const tabs = $("tabs");
+  for (const [key, label] of STATUSES) {
+    let b = tabs.querySelector(`[data-status="${key}"]`);
+    if (!b) {
+      b = document.createElement("button");
+      b.className = "tab";
+      b.dataset.status = key;
       b.onclick = () => selectTab(key);
-      return b;
-    }),
-  );
+      tabs.append(b);
+    }
+    b.classList.toggle("active", key === state.status);
+    b.setAttribute("aria-pressed", String(key === state.status));
+    const count = key ? data.counts[key] ?? 0 : total;
+    if (b.dataset.rendered !== `${label}|${count}`) {
+      b.innerHTML = `${label}<span class="count">${count}</span>`;
+      b.dataset.rendered = `${label}|${count}`;
+    }
+  }
 }
 
 function showListSkeleton(show) {
@@ -298,9 +332,79 @@ function showListSkeleton(show) {
   );
 }
 
+/** Scans that need a decision: no date, possible rescan, no back, blank back. The queue can show only these. */
+function isException(s) {
+  return s.date.precision === "unknown" || !!s.duplicate_group_id || !!s.operator_duplicate
+    || !!s.immich_duplicate_asset_id || !!s.operator_immich_duplicate || !s.has_back || s.back_type === "blank";
+}
+
+function queueSubline(s) {
+  const marks = [`<span>${s.date.precision === "unknown" ? "no date" : escapeHtml(s.date.label)}</span>`];
+  if (state.status === "") marks.push(`<span class="chip status ${s.status}">${statusLabel(s.status)}</span>`);
+  if (s.duplicate_group_id || s.operator_duplicate) marks.push(`<span class="chip warn">dup?</span>`);
+  if (s.immich_duplicate_asset_id || s.operator_immich_duplicate) marks.push(`<span class="chip warn">in Immich?</span>`);
+  if (!s.has_back) marks.push(`<span class="chip">no back</span>`);
+  else if (s.back_type === "content") marks.push(`<span class="chip">back text</span>`);
+  else if (s.back_type === "blank") marks.push(`<span class="chip">blank back</span>`);
+  return marks.join("");
+}
+
+/** Update a queue row in place; only the parts that changed are touched, so a poll never resets scroll or focus. */
+function syncQueueRow(li, s) {
+  const version = encodeURIComponent(s.updated_at);
+  const src = `/api/scans/${s.id}/image/front?size=160&v=${version}`;
+  const img = li.querySelector("img");
+  if (img.getAttribute("src") !== src) img.src = src;
+  const sub = queueSubline(s);
+  if (li.dataset.sub !== sub) { li.querySelector(".sub").innerHTML = sub; li.dataset.sub = sub; }
+  li.classList.toggle("selected", s.id === state.selectedId);
+}
+
+function queueRow(s, index) {
+  const li = document.createElement("li");
+  li.dataset.id = s.id;
+  li.tabIndex = 0;
+  li.className = "fresh";
+  li.style.setProperty("--i", index);
+  li.innerHTML = `<img loading="lazy" alt=""><div><div class="title">#${padId(s.id)}</div><div class="sub"></div></div>`;
+  li.onclick = () => selectScan(s.id);
+  li.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectScan(s.id); } };
+  li.addEventListener("animationend", () => li.classList.remove("fresh"), { once: true });
+  syncQueueRow(li, s);
+  return li;
+}
+
+function renderQueue() {
+  state.visible = state.exceptionsOnly ? state.scans.filter(isException) : state.scans;
+  const list = $("scan-list");
+  const existing = new Map([...list.children].map((li) => [Number(li.dataset.id), li]));
+  const wanted = new Set(state.visible.map((s) => s.id));
+  for (const [id, li] of existing) if (!wanted.has(id)) li.remove();
+  let cursor = list.firstElementChild;
+  let fresh = 0;
+  for (const s of state.visible) {
+    let li = existing.get(s.id);
+    if (li) syncQueueRow(li, s);
+    else li = queueRow(s, fresh++);
+    if (li !== cursor) list.insertBefore(li, cursor);
+    else cursor = cursor.nextElementSibling;
+  }
+  const exceptions = state.scans.filter(isException).length;
+  $("queue-count").textContent = state.exceptionsOnly
+    ? `${state.visible.length} of ${plural(state.scans.length, "scan")}`
+    : `${plural(state.scans.length, "scan")}${exceptions ? ` · ${exceptions} to decide` : ""}`;
+  $("empty-list").hidden = state.visible.length > 0;
+  $("empty-list").textContent = state.exceptionsOnly && state.scans.length ? "No exceptions left in this list." : "No scans here.";
+  updateNavButtons();
+}
+
 let listLoads = 0;
 async function loadList() {
-  const url = "/api/scans" + (state.status ? `?status=${state.status}` : "");
+  const params = new URLSearchParams();
+  if (state.status) params.set("status", state.status);
+  if (state.batchId != null) params.set("batch_id", state.batchId);
+  const query = params.toString();
+  const url = "/api/scans" + (query ? `?${query}` : "");
   const load = ++listLoads;
   const slow = setTimeout(() => { if (load === listLoads && !$("scan-list").children.length) showListSkeleton(true); }, 120);
   try {
@@ -309,51 +413,30 @@ async function loadList() {
     clearTimeout(slow);
     if (load === listLoads) showListSkeleton(false);
   }
-  $("queue-count").textContent = `${state.scans.length} scan${state.scans.length === 1 ? "" : "s"}`;
-  $("scan-list").replaceChildren(
-    ...state.scans.map((s, i) => {
-      const li = document.createElement("li");
-      li.dataset.id = s.id;
-      li.tabIndex = 0;
-      li.style.setProperty("--i", i);
-      li.className = s.id === state.selectedId ? "selected" : "";
-      li.innerHTML = `
-        <img loading="lazy" src="/api/scans/${s.id}/image/front?size=160&v=${encodeURIComponent(s.updated_at)}" alt="">
-        <div>
-          <div class="title">#${String(s.id).padStart(6, "0")}</div>
-          <div class="sub">
-            <span>${s.date.precision === "unknown" ? "no date" : escapeHtml(s.date.label)}</span>
-            ${state.status ? "" : `<span class="chip status ${s.status}">${statusLabel(s.status)}</span>`}
-            ${s.duplicate_group_id || s.operator_duplicate ? `<span class="chip warn">dup?</span>` : ""}
-            ${s.immich_duplicate_asset_id || s.operator_immich_duplicate ? `<span class="chip warn">in Immich?</span>` : ""}
-            ${s.back_type === "content" ? `<span class="chip">back text</span>` : ""}
-          </div>
-        </div>`;
-      li.onclick = () => selectScan(s.id);
-      li.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectScan(s.id); } };
-      return li;
-    }),
-  );
-  $("empty-list").hidden = state.scans.length > 0;
-  updateNavButtons();
+  if (load !== listLoads) return; // a newer load is already rendering
+  renderQueue();
 }
 
 async function refresh() {
+  if (typeof invalidateBatch === "function") invalidateBatch();
   await Promise.all([loadSummary(), loadList()]);
+  if (typeof renderStage === "function") renderStage();
 }
 
-async function selectTab(status) {
+async function selectTab(status, { batchId = state.batchId } = {}) {
   if (!(await confirmLeave())) return;
   state.status = status;
+  state.batchId = batchId;
+  if (typeof renderBatchFilter === "function") renderBatchFilter();
   await refresh();
-  if (state.scans.length) selectScan(state.scans[0].id, true);
+  if (state.visible.length) selectScan(state.visible[0].id, true);
   else showEditor(null);
 }
 
 function updateNavButtons() {
-  const i = state.scans.findIndex((s) => s.id === state.selectedId);
+  const i = state.visible.findIndex((s) => s.id === state.selectedId);
   $("btn-prev").disabled = i <= 0;
-  $("btn-next").disabled = i < 0 || i >= state.scans.length - 1;
+  $("btn-next").disabled = i < 0 || i >= state.visible.length - 1;
 }
 
 // ---------- editor ----------
@@ -364,7 +447,7 @@ function markDirty(dirty = true) {
 
 async function confirmLeave() {
   if (!state.dirty) return true;
-  try { await save(); return true; } catch (e) { toast(e.message, true); return false; }
+  try { await save(); return true; } catch (e) { failToast(e); return false; }
 }
 
 /** Show a skeleton in the image well until the preview has decoded. The well keeps its size either way. */
@@ -391,9 +474,16 @@ function fieldBusy(el, field) {
 }
 
 function showEditor(scan, { full = false } = {}) {
-  $("placeholder").hidden = !!scan;
   $("editor").hidden = !scan;
-  if (!scan) { state.selectedId = null; state.current = null; updateNavButtons(); return; }
+  if (!scan) {
+    state.selectedId = null;
+    state.current = null;
+    document.querySelectorAll("#scan-list li.selected").forEach((li) => li.classList.remove("selected"));
+    updateNavButtons();
+    if (typeof renderBatchCard === "function") renderBatchCard(null);
+    if (typeof renderStage === "function") renderStage();
+    return;
+  }
 
   // Refresh = same scan re-rendered after an async action (keeps fields being edited). `full` forces a clean render
   // without ever clearing state.selectedId, so a shortcut pressed mid-transition still has a scan to act on.
@@ -405,8 +495,10 @@ function showEditor(scan, { full = false } = {}) {
   const sug = scan.suggestions || {};
   document.querySelectorAll("#scan-list li").forEach((li) => li.classList.toggle("selected", +li.dataset.id === scan.id));
   updateNavButtons();
+  if (typeof renderStage === "function") renderStage();
+  if (typeof renderBatchCard === "function") renderBatchCard(scan);
 
-  $("scan-title").textContent = `Scan #${String(scan.id).padStart(6, "0")}`;
+  $("scan-title").textContent = `Scan #${padId(scan.id)}`;
   $("scan-status").className = `chip status ${scan.status}`;
   $("scan-status").textContent = statusLabel(scan.status);
   $("scan-batch").textContent = [scan.batch, scan.source_key].filter(Boolean).join(" · ");
@@ -460,13 +552,14 @@ function showEditor(scan, { full = false } = {}) {
   const d = scan.date;
   if (!refreshing || !fieldBusy($("date-text"), "date")) {
     $("date-text").value = d.precision === "unknown" ? "" : d.label;
-    renderDatePreview(d.precision === "unknown" ? null : [d]);
+    renderDatePreview(d.precision === "unknown" ? null : [d], null, $("date-preview"), scan.date_source);
     setSuggested($("date-text"), !committed && !!sug.date && sug.date.value === (d.precision === "unknown" ? null : d.label));
   }
   if (!refreshing || !fieldBusy($("description"), "description")) {
     $("description").value = scan.description || "";
     setSuggested($("description"), !committed && !!sug.description && sug.description.value === (scan.description || ""));
   }
+  if (!refreshing) $("more-fields").open = (scan.people || []).length > 0;
   for (const f of CHIP_FIELDS) {
     if (refreshing && chips[f].busy()) continue;
     chips[f].set(scan[f], sug[f]?.value || [], committed);
@@ -493,21 +586,41 @@ async function selectScan(id, force = false, full = false) {
     const scan = await api("GET", `/api/scans/${id}`);
     showEditor(scan, { full: full || id !== state.selectedId }); // a different scan always renders fully
   } catch (e) {
-    toast(e.message, true);
+    failToast(e);
   }
 }
 
-function renderDatePreview(candidates, error) {
-  const el = $("date-preview");
+const DATE_SOURCES = { back_ocr: "read from the back", front_imprint: "read from the front", batch: "set on the whole batch", manual: "typed by you" };
+
+function renderDatePreview(candidates, error, el = $("date-preview"), source = null) {
   if (error) { el.innerHTML = `<span class="bad">${escapeHtml(error)}</span>`; return; }
-  if (!candidates) { el.innerHTML = `<span>No date. Immich will use the export time.</span>`; return; }
+  if (!candidates) {
+    el.textContent = el.dataset.emptyText || "No date yet. The photo stays in the “no date” count; Immich would show the export time.";
+    return;
+  }
   if (!candidates.length) { el.innerHTML = `<span class="bad">Not understood. Try “Dec 1984”, “'84”, “Summer 1979”…</span>`; return; }
   const [best, ...others] = candidates;
   el.innerHTML = `
     <span>Reads as</span> <span class="ok">${escapeHtml(best.label)}</span>
-    <span class="chip">${best.precision}</span>
+    <span class="chip">${best.precision}${best.approximate ? ", approximate" : ""}</span>
+    ${source && DATE_SOURCES[source] ? `<span>${DATE_SOURCES[source]}</span>` : ""}
     <span>timeline: <span class="mono">${escapeHtml(best.exif ?? "none")}</span></span>
     ${others.length ? `<span>also found: ${others.map((o) => escapeHtml(o.label)).join(", ")}</span>` : ""}`;
+}
+
+/** Live "read as …" preview under a free-text date field (150 ms debounce). Shared by the scan and batch forms. */
+function wireDatePreview(input, preview, onInput) {
+  let timer;
+  input.addEventListener("input", () => {
+    onInput?.();
+    clearTimeout(timer);
+    const text = input.value.trim();
+    if (!text) { renderDatePreview(null, null, preview); return; }
+    timer = setTimeout(async () => {
+      try { renderDatePreview(await api("GET", `/api/dates/parse?text=${encodeURIComponent(text)}`), null, preview); }
+      catch (e) { renderDatePreview(null, e.message, preview); }
+    }, 150);
+  });
 }
 
 // ---------- autocorrect (recurring misspellings: "Januaru" -> "January") ----------
@@ -543,22 +656,14 @@ function wireAutocorrect(el, field, after) {
 }
 wireAutocorrect($("date-text"), "date", () => {
   const text = $("date-text").value.trim();
-  if (text) api("GET", `/api/dates/parse?text=${encodeURIComponent(text)}`).then(renderDatePreview).catch(() => {});
+  if (text) api("GET", `/api/dates/parse?text=${encodeURIComponent(text)}`).then((c) => renderDatePreview(c)).catch(() => {});
 });
 wireAutocorrect($("description"), "description", () => scheduleDerive(0));
 
-let parseTimer;
-$("date-text").addEventListener("input", () => {
+wireDatePreview($("date-text"), $("date-preview"), () => {
   state.edited.add("date");
   setSuggested($("date-text"), false);
   markDirty();
-  clearTimeout(parseTimer);
-  const text = $("date-text").value.trim();
-  if (!text) { renderDatePreview(null); return; }
-  parseTimer = setTimeout(async () => {
-    try { renderDatePreview(await api("GET", `/api/dates/parse?text=${encodeURIComponent(text)}`)); }
-    catch (e) { renderDatePreview(null, e.message); }
-  }, 150);
 });
 $("description").addEventListener("input", () => {
   state.edited.add("description");
@@ -599,20 +704,20 @@ function setStatus(status) {
 
 async function applyStatus(status) {
   if (state.selectedId == null) return;
-  const currentIndex = state.scans.findIndex((s) => s.id === state.selectedId);
+  const currentIndex = state.visible.findIndex((s) => s.id === state.selectedId);
   try {
     const scan = await save({ status });
     const recorded = scan.corrections_recorded;
     toast(`#${scan.id} ${statusLabel(status).toLowerCase()}${recorded ? ` · ${recorded} corrections recorded for learning` : ""}`);
     if (recorded) loadLearningCount();
     await refresh();
-    const next = state.scans.find((s) => s.id === scan.id)
+    const next = state.visible.find((s) => s.id === scan.id)
       ? scan.id
-      : state.scans[Math.min(currentIndex, state.scans.length - 1)]?.id;
+      : state.visible[Math.min(currentIndex, state.visible.length - 1)]?.id;
     if (next != null) await selectScan(next, true, true); // full render, selection never cleared
     else showEditor(null);
   } catch (e) {
-    toast(e.message, true);
+    failToast(e);
   }
 }
 
@@ -624,7 +729,7 @@ $("form").addEventListener("submit", async (e) => {
     await refresh();
     showEditor(scan);
   } catch (err) {
-    toast(err.message, true);
+    failToast(err);
   }
 });
 
@@ -754,7 +859,7 @@ async function applyScanAction(run, message) {
     showEditor(scan);
     if (message) toast(message);
   } catch (e) {
-    toast(e.message, true);
+    failToast(e);
   }
 }
 
@@ -762,7 +867,7 @@ async function withButton(button, fn) {
   button.disabled = true;
   button.classList.add("busy");
   button.setAttribute("aria-busy", "true");
-  try { await fn(); } catch (e) { toast(e.message, true); } finally {
+  try { await fn(); } catch (e) { failToast(e); } finally {
     button.disabled = false;
     button.classList.remove("busy");
     button.setAttribute("aria-busy", "false");
@@ -778,9 +883,9 @@ async function rotate(side, step) {
 }
 
 function move(delta) {
-  if (!state.scans.length) return;
-  const i = state.scans.findIndex((s) => s.id === state.selectedId);
-  const next = state.scans[Math.max(0, Math.min(state.scans.length - 1, i + delta))];
+  if (!state.visible.length) return;
+  const i = state.visible.findIndex((s) => s.id === state.selectedId);
+  const next = state.visible[Math.max(0, Math.min(state.visible.length - 1, i + delta))];
   if (next && next.id !== state.selectedId) selectScan(next.id);
 }
 
@@ -820,25 +925,39 @@ $("btn-reject").onclick = () => setStatus("rejected");
 async function deleteScan() {
   if (state.selectedId == null) return;
   const id = state.selectedId;
-  const currentIndex = state.scans.findIndex((s) => s.id === id);
+  const currentIndex = state.visible.findIndex((s) => s.id === id);
   const ok = await confirmAction({
-    title: `Delete scan #${String(id).padStart(6, "0")} permanently?`,
+    title: `Delete scan #${padId(id)} permanently?`,
     body: "Removes the original front and back files from the archive, and this record. The scan won't come back.",
     confirmLabel: "Delete permanently",
   });
   if (!ok) return;
   try {
     await api("DELETE", `/api/scans/${id}`);
-    toast(`#${String(id).padStart(6, "0")} deleted permanently`);
+    toast(`#${padId(id)} deleted permanently`);
     await refresh();
-    const next = state.scans[Math.min(currentIndex, state.scans.length - 1)]?.id;
+    const next = state.visible[Math.min(currentIndex, state.visible.length - 1)]?.id;
     if (next != null) await selectScan(next, true, true); // full render, selection never cleared
     else showEditor(null);
   } catch (e) {
-    toast(e.message, true);
+    failToast(e);
   }
 }
 $("btn-delete").onclick = () => withButton($("btn-delete"), deleteScan);
+
+// ---------- queue filter ----------
+try {
+  state.exceptionsOnly = localStorage.getItem("exceptionsOnly") === "1";
+} catch { /* storage unavailable */ }
+$("exceptions-only").checked = state.exceptionsOnly;
+$("exceptions-only").addEventListener("change", async () => {
+  state.exceptionsOnly = $("exceptions-only").checked;
+  try { localStorage.setItem("exceptionsOnly", state.exceptionsOnly ? "1" : "0"); } catch { /* ignore */ }
+  renderQueue();
+  if (typeof renderStage === "function") renderStage();
+  if (state.visible.length && !state.visible.some((s) => s.id === state.selectedId)) await selectScan(state.visible[0].id, true);
+  else if (!state.visible.length) showEditor(null);
+});
 
 // ---------- pipeline ----------
 $("btn-ingest").onclick = () => withButton($("btn-ingest"), async () => {
@@ -847,10 +966,11 @@ $("btn-ingest").onclick = () => withButton($("btn-ingest"), async () => {
   if (r.possible_duplicates.length) lines.push(`${r.possible_duplicates.length} possible rescan(s) flagged`);
   if (r.unmatched.length) lines.push(`Ignored: ${r.unmatched.join(", ")}`);
   toast(lines.join("\n"));
-  await selectTab("needs_review");
+  if (typeof clearStageEvent === "function") clearStageEvent();
+  await selectTab("needs_review", { batchId: null });
 });
 
-$("btn-export").onclick = () => withButton($("btn-export"), async () => {
+async function exportApproved() {
   if (!(await confirmLeave())) return;
   await loadSummary();
   const approved = state.counts.approved ?? 0;
@@ -862,17 +982,23 @@ $("btn-export").onclick = () => withButton($("btn-export"), async () => {
   });
   if (!ok) return;
   const r = await api("POST", "/api/export");
-  if (r.errors.length) toast(`Exported ${r.exported.length}, failed ${r.errors.length}:\n` + r.errors.map((x) => `#${x.id}: ${x.error}`).join("\n"), true);
-  else toast(r.exported.length ? `Exported ${r.exported.length} scan(s) to the Immich library` : "Nothing approved to export");
+  if (r.errors.length) {
+    toast(`Exported ${r.exported.length}, failed ${r.errors.length}:\n` + r.errors.map((x) => `#${x.id}: ${x.error}`).join("\n") + "\n[EXPORT_PARTIAL]", true);
+  } else {
+    toast(r.exported.length ? `Exported ${r.exported.length} scan(s) to the Immich library` : "Nothing approved to export");
+  }
+  if (typeof stageEvent === "function") stageEvent(r.errors.length ? "attention" : "done", { kind: "export", result: r });
   await refresh();
   if (state.selectedId != null) await selectScan(state.selectedId, true, true);
-});
+}
+$("btn-export").onclick = () => withButton($("btn-export"), exportApproved);
 
 window.addEventListener("beforeunload", (e) => { if (state.dirty) e.preventDefault(); });
 
 // ---------- scanner ----------
 let scanPoll = null;
 let destinationChosen = false;
+let lastScanner = null; // last /api/scanner payload: the stage and the strip read it
 try {
   const saved = localStorage.getItem("scanDestination");
   if (saved === "review" || saved === "inbox") { $("scan-destination").value = saved; destinationChosen = true; }
@@ -890,31 +1016,40 @@ $("scan-count").addEventListener("change", () => {
   $("btn-scan").textContent = $("scan-count").value === "one" ? "Scan one photo" : "Scan feeder";
 });
 
+/** Front and back are one photo, not two: count pages the way the finished-scan message does. */
+function scanPhotos(s) {
+  const rawPages = s.scan?.pages ?? 0;
+  return s.duplex ? Math.ceil(rawPages / 2) : rawPages;
+}
+
 function renderScanner(s) {
+  lastScanner = s;
   const el = $("scanner-status");
   const button = $("btn-scan");
   const destination = $("scan-destination-wrap");
   const count = $("scan-count-wrap");
-  if (!s.configured) { el.hidden = true; button.hidden = true; destination.hidden = true; count.hidden = true; return; }
-  const scanning = s.scan?.state === "scanning";
-  el.hidden = false;
-  button.hidden = false;
-  destination.hidden = false;
-  count.hidden = false;
-  $("scan-destination").disabled = scanning;
-  $("scan-count").disabled = scanning;
-  if (!destinationChosen && s.after_scan) $("scan-destination").value = s.after_scan;
-  el.className = `scanner-status ${scanning ? "busy" : s.online ? "online" : "offline"}`;
-  // Front and back are one photo, not two: count pages the same way the finished-scan message does.
-  const rawPages = s.scan?.pages ?? 0;
-  const photos = s.duplex ? Math.ceil(rawPages / 2) : rawPages;
-  const label = `${photos} photo${photos === 1 ? "" : "s"}`;
-  el.textContent = !scanning
-    ? `Scanner ${s.online ? "online" : "offline"}`
-    : s.scan.phase === "ingesting" ? `Processing ${label}` : `Scanning, ${label}`;
-  el.title = `${s.device} · ${s.source} · ${s.mode} · ${s.resolution} dpi`;
-  button.disabled = scanning || !s.online;
-  button.textContent = scanning ? "Scanning" : $("scan-count").value === "one" ? "Scan one photo" : "Scan feeder";
+  if (!s.configured) {
+    el.hidden = true; button.hidden = true; destination.hidden = true; count.hidden = true;
+  } else {
+    const scanning = s.scan?.state === "scanning";
+    el.hidden = false;
+    button.hidden = false;
+    destination.hidden = false;
+    count.hidden = false;
+    $("scan-destination").disabled = scanning;
+    $("scan-count").disabled = scanning;
+    if (!destinationChosen && s.after_scan) $("scan-destination").value = s.after_scan;
+    el.className = `strip-item scanner-status ${scanning ? "busy" : s.online ? "online" : "offline"}`;
+    const label = plural(scanPhotos(s), "photo");
+    el.textContent = !scanning
+      ? `Scanner ${s.online ? "online" : "offline"}`
+      : s.scan.phase === "ingesting" ? `Processing ${label}` : `Scanning, ${label}`;
+    el.title = `${s.device} · ${s.source} · ${s.mode} · ${s.resolution} dpi`;
+    button.disabled = scanning || !s.online;
+    button.textContent = scanning ? "Scanning" : $("scan-count").value === "one" ? "Scan one photo" : "Scan feeder";
+  }
+  if (typeof renderStrip === "function") renderStrip();
+  if (typeof renderStage === "function") renderStage();
 }
 
 async function loadScannerStatus() {
@@ -940,30 +1075,37 @@ function watchScan() {
     scanPoll = null;
     loadHealth();
     if (run.state === "failed") {
-      toast(`Scan failed: ${run.message}`, true);
+      const code = typeof scanFailureCode === "function" ? scanFailureCode(run.message) : "SCAN_FAILED";
+      toast(`Scan failed: ${run.message}\nPages already scanned stay in the inbox; nothing was deleted. [${code}]`, true);
+      if (typeof stageEvent === "function") stageEvent("attention", { kind: "scan", run });
     } else if (run.state === "done" && run.destination === "inbox") {
       toast(`${run.message}\nClick Ingest inbox to review them.`);
+      if (typeof stageEvent === "function") stageEvent("done", { kind: "scan-inbox", run });
     } else if (run.state === "done") {
       const created = run.ingest?.created?.length ?? 0;
       const dups = run.ingest?.possible_duplicates?.length ?? 0;
       toast(`${run.message}\nIngested ${created} scan(s)${dups ? `, ${dups} possible rescan(s)` : ""}`);
-      await selectTab("needs_review");
+      if (typeof clearStageEvent === "function") clearStageEvent();
+      await selectTab("needs_review", { batchId: null });
     }
   }, 1500);
 }
 
-$("btn-scan").onclick = () => withButton($("btn-scan"), async () => {
+async function startScan() {
   const destination = $("scan-destination").value;
+  if (typeof clearStageEvent === "function") clearStageEvent();
   await api("POST", "/api/scanner/scan", { destination, count: $("scan-count").value });
   toast(destination === "inbox"
     ? "Scanning started. Files will be left in the inbox."
     : "Scanning started. Photos appear in the review queue when the feeder is empty.");
   await loadScannerStatus();
   watchScan();
-});
+}
+$("btn-scan").onclick = () => withButton($("btn-scan"), startScan);
 
 // ---------- system health ----------
 let lastHealthRows = 13;
+let lastHealth = null; // last /api/health payload (null while unreachable): the strip reads it
 
 async function loadHealth() {
   const button = $("btn-health");
@@ -974,8 +1116,12 @@ async function loadHealth() {
   } catch {
     dot.className = "dot fail";
     $("health-text").textContent = "API unreachable";
+    lastHealth = null;
+    if (typeof renderStrip === "function") renderStrip();
+    if (typeof stageEvent === "function") stageEvent("attention", { kind: "api" });
     return;
   }
+  lastHealth = data;
   const problems = data.checks.filter((c) => c.status === "fail").length;
   const warnings = data.checks.filter((c) => c.status === "warn").length;
   dot.className = `dot ${data.overall}`;
@@ -984,17 +1130,19 @@ async function loadHealth() {
     : problems ? `${problems} problem${problems === 1 ? "" : "s"}` : `${warnings} warning${warnings === 1 ? "" : "s"}`;
   button.title = data.checks.filter((c) => c.status !== "ok").map((c) => `${c.label}: ${c.detail}`).join("\n") || "All components healthy";
   lastHealthRows = data.checks.length;
-  $("health-list").replaceChildren(
-    ...data.checks.map((c) => {
-      const li = document.createElement("li");
-      li.dataset.name = c.name;
-      li.dataset.status = c.status;
-      li.innerHTML = `<span class="dot ${c.status}"></span><strong>${escapeHtml(c.label)}</strong><span class="health-detail">${escapeHtml(c.detail)}</span>`;
-      return li;
-    }),
-  );
-  $("health-list").setAttribute("aria-busy", "false");
+  const list = $("health-list");
+  for (const c of data.checks) {
+    let li = list.querySelector(`li[data-name="${c.name}"]`);
+    if (!li) { li = document.createElement("li"); li.dataset.name = c.name; list.append(li); }
+    li.dataset.status = c.status;
+    const html = `<span class="dot ${c.status}"></span><strong>${escapeHtml(c.label)}</strong><span class="health-detail">${escapeHtml(c.detail)}</span>`;
+    if (li.innerHTML !== html) li.innerHTML = html;
+  }
+  [...list.children].forEach((li) => { if (!li.dataset.name || !data.checks.some((c) => c.name === li.dataset.name)) li.remove(); });
+  list.setAttribute("aria-busy", "false");
   $("health-checked").textContent = `checked ${new Date().toLocaleTimeString()}`;
+  if (typeof renderStrip === "function") renderStrip();
+  if (typeof clearStageEvent === "function") clearStageEvent("api");
 }
 
 function panelSkeleton(list, rows) {
@@ -1226,8 +1374,9 @@ $("immich-settings-form").addEventListener("submit", async (e) => {
     setTimeout(() => ($("immich-save-state").textContent = ""), 2000);
     await loadImmichSettings();
     renderImmichConnection(saved);
+    loadHealth();
   } catch (e2) {
-    toast(e2.message, true);
+    failToast(e2);
   }
 });
 
@@ -1235,15 +1384,18 @@ $("btn-immich-test").onclick = () => withButton($("btn-immich-test"), async () =
   const status = await api("GET", "/api/immich/status");
   if (!status.enabled) toast("Turn on Enabled and save first");
   else if (status.connected) toast(`Connected${status.asset_count != null ? ` – ${status.asset_count} asset(s)` : ""}`);
-  else toast(status.error || "Could not connect", true);
+  else toast(`${status.error || "Could not connect"}\nCheck the URL and key, then Test connection again. [IMMICH_UNREACHABLE]`, true);
 });
 
 let immichCheckPoll = null;
+let lastImmichCheck = null; // last /api/immich/check/status payload: the strip's job count reads it
 
 function renderImmichProgress(status) {
+  lastImmichCheck = status;
   const wrap = $("immich-progress-wrap");
   const reading = status.state === "running" && status.phase === "assets";
   wrap.hidden = !(reading || (status.state === "done" && status.total));
+  if (typeof renderStrip === "function") renderStrip();
   if (wrap.hidden) return;
   const total = status.total || 0;
   const done = status.state === "done" ? total || status.done : Math.min(status.done, total || status.done);
@@ -1267,7 +1419,7 @@ function pollImmichCheck() {
   immichCheckPoll = setInterval(async () => {
     const status = await tick();
     if (status.state === "done") { toast("Immich check finished"); await refresh(); }
-    else if (status.state === "failed") toast(status.message || "Immich check failed", true);
+    else if (status.state === "failed") toast(`${status.message || "Immich check failed"}\nNothing was changed. Check the Immich settings and run it again. [IMMICH_CHECK_FAILED]`, true);
   }, 1000);
 }
 
@@ -1291,14 +1443,13 @@ $("btn-immich-check").onclick = () => withButton($("btn-immich-check"), async ()
   try {
     await api("POST", "/api/immich/check");
   } catch (e) {
-    toast(e.message, true);
+    failToast(e);
     return;
   }
   pollImmichCheck();
 });
 
 // ---------- account ----------
-api("GET", "/api/auth/me").then((me) => { $("user-chip").textContent = me.username; }).catch(() => {});
 $("btn-logout").onclick = async () => {
   try { await api("POST", "/api/auth/logout"); } catch { /* already signed out */ }
   location.replace("/login");
@@ -1322,11 +1473,20 @@ $("btn-logout").onclick = async () => {
   }, 1000);
 })();
 
-// ---------- start ----------
-renderShortcutHints();
-loadHealth();
-setInterval(loadHealth, 30000);
-loadScannerStatus();
-setInterval(loadScannerStatus, 30000);
-loadLearningCount();
-selectTab(state.status);
+// ---------- start (after every script has loaded: stage.js and tour.js add to this page) ----------
+document.addEventListener("DOMContentLoaded", () => {
+  renderShortcutHints();
+  // Sign-in is optional (off in the single-computer desktop build): without it there is no account to show or end.
+  api("GET", "/api/auth/state").then((s) => {
+    $("user-chip").textContent = s.required ? s.username || "" : "";
+    $("user-chip").hidden = !s.required;
+    $("btn-logout").hidden = !s.required;
+  }).catch(() => {});
+  loadHealth();
+  setInterval(loadHealth, 30000);
+  loadScannerStatus();
+  setInterval(loadScannerStatus, 30000);
+  loadLearningCount();
+  resumeImmichCheckDisplay().catch(() => {});
+  selectTab(state.status);
+});

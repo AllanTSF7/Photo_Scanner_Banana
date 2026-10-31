@@ -19,6 +19,7 @@ dependencies = [
     "httpx>=0.27",
     "zeroconf>=0.130",  # finds the scanner on the network by name (mDNS)
     "pytwain>=2.3; sys_platform == 'win32'",  # Epson's TWAIN driver on Windows, where SANE doesn't exist
+    "pywebview>=5.4; sys_platform == 'win32'",  # the desktop build's native window (Edge WebView2); browser fallback without it
 ]
 
 [project.optional-dependencies]

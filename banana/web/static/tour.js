@@ -3,7 +3,9 @@
    - Never starts by itself: the operator opens it with the Guide button (or "G").
    - Popovers are styled from theme.css tokens in app.css; motion follows prefers-reduced-motion.
    - Steps whose control isn't on screen (no scanner, no scan selected) are skipped, so the tour never
-     points at nothing. It selects the first scan when the editor is empty, changing nothing else. */
+     points at nothing. It selects the first scan when the editor is empty, changing nothing else.
+   - Every selector is an id or scoped to one (#form .grid2, not .grid2): the Immich panel and the batch
+     form reuse the same classes earlier in the page (B-26). */
 
 (function () {
   const TOUR_KEY = "tourCompleted";
@@ -18,37 +20,43 @@
     const scannerOn = visible($("btn-scan"));
     const steps = [
       step(undefined, "The review workflow",
-        "Photos come in from the scanner, the app suggests a date, text and names, you check each one, and approved scans are exported for Immich. This guide walks through that, in order. Use Next, or press Escape to leave."),
+        "Photos come in from the scanner, the app suggests a date, text and places, you label the batch once, check the exceptions, and approved scans are exported for Immich. This guide walks through that, in order. Use Next, or press Escape to leave."),
       scannerOn
         ? step("#btn-scan", "1. Scan photos",
             "Load the feeder and click Scan feeder. <strong>Feed</strong> chooses the whole stack or a single photo; <strong>After scan</strong> decides whether new photos land in the review queue or just in the inbox. Each photo is scanned front and back.")
         : step("#btn-ingest", "1. Bring photos in",
             "Click Ingest inbox to pick up scan files that are already in the inbox folder. When the scanner is online you also get a Scan feeder button here."),
-      step(".queue", "2. The queue",
-        "Every scan waiting for you. The tabs above filter by state: To review, Approved, Exported, Rejected. Marks show a possible rescan (<em>dup?</em>) and whether the back has writing.",
+      step("#status-strip", "2. The status strip",
+        "Always visible: system health, the scanner, the folders the app writes to, Immich when it is enabled, and whether a job is running. Each item says what it means in words, not just a colour.",
+        { side: "bottom", align: "start" }),
+      step(".queue", "3. The queue",
+        "Every scan waiting for you. The tabs above filter by state: To review, Approved, Exported, Rejected. <strong>Exceptions only</strong> narrows it to scans that need a decision: no date, a possible rescan (<em>dup?</em>), no back, or a blank back.",
         { side: "right", align: "start" }),
-      step(".images", "3. Front and back",
+      step("#batch-card", "4. Label the whole batch first",
+        "A stack from one box usually shares a date, a place and an event. <strong>Label whole batch</strong> fills what is still empty on every scan still to review, and records who may see the batch. Then only the exceptions need a look.",
+        { side: "bottom" }),
+      step(".images", "5. Front and back",
         "The photo and the back of the print, cropped automatically from the full scanner page. Rotate each side if it came out sideways; the original scan file is never changed.",
         { side: "top" }),
-      step(".editor-tools", "4. Fix the scan itself",
+      step(".editor-tools", "6. Fix the scan itself",
         "<strong>Swap front/back</strong> when the picture shows up as the back. <strong>Re-detect crop</strong> if the trim is wrong. <strong>Flag duplicate</strong> marks a rescan you don't want. Previous and Next move through the queue.",
         { side: "bottom" }),
-      step("#ocr-panel", "5. Text on the back",
+      step("#ocr-panel", "7. Text on the back",
         "Printed text on the back is read automatically. Click a line to add it to the description. <strong>Fix</strong> corrects a misread line and <strong>Not text</strong> rejects lab codes and smudges. Approved fixes teach the app, and the same misreading is corrected by itself next time.",
         { side: "top" }),
-      step("#date-text", "6. Date",
-        "Type the date as it's written on the photo: <em>Xmas '84</em>, <em>Summer of 1979</em>, <em>1960s</em>. The line underneath shows how it was understood and where the photo lands on the Immich timeline.",
+      step("#date-text", "8. Date",
+        "Type the date as it's written on the photo: <em>Xmas '84</em>, <em>Summer of 1979</em>, <em>1960s</em>. The line underneath shows how it was read, how precise it is, and where the photo lands on the Immich timeline.",
         { side: "top" }),
-      step("#description", "7. Description",
-        "Text from the back, or your own note. People, places and events are suggested from whatever is in here.",
+      step("#description", "9. Description",
+        "Text from the back, or your own note. Places, events and people are suggested from whatever is in here.",
         { side: "top" }),
-      step("#form .grid2", "8. People, places, events, tags",
-        "Filled in from the description. <strong>Dashed chips are suggestions</strong> until you approve or edit the field: click a “+” chip to add it, or the × to remove one, and it won't be suggested again for this photo.",
+      step("#main-fields", "10. Places, events, tags",
+        "Filled in from the description. <strong>Dashed chips are suggestions</strong> until you approve or edit the field: click a “+” chip to add it, or the × to remove one, and it won't be suggested again for this photo. People sit below, folded away: Immich groups faces after import, so naming a cluster once there is faster than typing names here.",
         { side: "top" }),
-      step("#form .form-actions", "9. Approve or reject",
+      step("#form .form-actions", "11. Approve or reject",
         "<strong>Approve</strong> queues the photo for export and records what you changed, so the app gets better at the next batch. <strong>Reject</strong> leaves it out; the original scan stays in the archive either way. The letters on the buttons are keyboard shortcuts.",
         { side: "top" }),
-      step("#btn-export", "10. Export approved",
+      step("#btn-export", "12. Export approved",
         "Writes every approved photo into the library folder with its date and tags, ready for Immich to import. It asks for confirmation first, because exported files leave the app.",
         { side: "bottom", align: "end" }),
       step("#btn-learning", "What the app learns",
@@ -58,7 +66,7 @@
         "Green means the scanner, folders, text reader and database are all fine. Open it when something looks off.",
         { side: "bottom", align: "start" }),
       step(undefined, "That's the loop",
-        "Scan, check, approve, export. Reopen this guide any time with the <strong>Guide</strong> button, or by pressing G."),
+        "Scan, label the batch, check the exceptions, approve, export. Reopen this guide any time with the <strong>Guide</strong> button, or by pressing G."),
     ];
     return steps.filter((s) => !s.element || visible(document.querySelector(s.element)));
   }
@@ -78,8 +86,10 @@
       firstScan.click();
       for (let i = 0; i < 40 && !visible($("editor")); i++) await new Promise((r) => setTimeout(r, 50));
     }
+    for (let i = 0; i < 40 && visible($("editor")) && $("batch-card").hidden; i++) await new Promise((r) => setTimeout(r, 50));
     document.getElementById("health-panel").hidden = true;
     document.getElementById("learning-panel").hidden = true;
+    document.getElementById("immich-panel").hidden = true;
 
     const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     const tour = factory({

@@ -14,7 +14,7 @@ Design and phases: see the approved plan (kept outside the repo) and `docs/`.
 |---|---|
 | 1 Skeleton: config, DB, job queue, `banana_core` (dHash, blank metrics, decode) | done |
 | 2 Export engine: layout, ExifTool writer + readback verify, `banana export --manual-json` | done — verify in Immich (`docs/manual-export.md`) |
-| Ingest (pairing, blank backs, dHash rescans) + review web UI | done (basic) |
+| Ingest (pairing, blank backs, dHash rescans) + review web UI | done: state-driven stage, status strip, batch-level label, exceptions filter |
 | 3 Analysis (watcher, DINOv3, TrOCR) | next |
 | 5 Immich stacks/albums · 6 profiling | later |
 

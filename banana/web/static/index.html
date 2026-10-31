@@ -8,34 +8,25 @@
   <link rel="stylesheet" href="/static/theme.css">
   <link rel="stylesheet" href="/static/vendor/driver/driver.css">
   <link rel="stylesheet" href="/static/app.css">
-  <link rel="icon" href="data:,">
+  <link rel="icon" href="/static/icon.png" type="image/png">
 </head>
 <body>
+  <!-- Top bar: brand, status filter, and the three pipeline actions. Everything else lives in the status strip. -->
   <header class="topbar">
-    <div class="brand"><strong>Photo Scanner</strong> <span class="muted">review</span></div>
+    <div class="brand"><img class="brand-mark" src="/static/icon.png" alt="" width="28" height="28"><strong>Photo Scanner</strong> <span class="muted">review</span></div>
     <nav class="tabs" id="tabs" aria-label="Scan status"></nav>
     <div class="actions">
-      <div class="action-group status-group">
-        <button id="btn-health" class="btn ghost health-button" aria-expanded="false" aria-controls="health-panel">
-          <span class="dot"></span><span id="health-text">System</span>
-        </button>
-        <button id="btn-learning" class="btn ghost learning-button" aria-expanded="false" aria-controls="learning-panel">
-          Learning <span id="learning-count" class="count-badge mono">0</span>
-        </button>
-        <button id="btn-immich" class="btn ghost" aria-expanded="false" aria-controls="immich-panel">Immich</button>
-        <span id="scanner-status" class="scanner-status" hidden></span>
-      </div>
       <div class="action-group scan-group">
         <label id="scan-count-wrap" class="inline-select" hidden>
           <span class="muted">Feed</span>
-          <select id="scan-count">
+          <select id="scan-count" aria-label="How much to scan">
             <option value="all">Whole stack</option>
             <option value="one">One photo</option>
           </select>
         </label>
         <label id="scan-destination-wrap" class="inline-select" hidden>
           <span class="muted">After scan</span>
-          <select id="scan-destination">
+          <select id="scan-destination" aria-label="Where scanned photos go">
             <option value="review">Add to review queue</option>
             <option value="inbox">Leave in inbox</option>
           </select>
@@ -45,14 +36,26 @@
       <div class="action-group pipeline-group">
         <button id="btn-ingest" class="btn">Ingest inbox</button>
         <button id="btn-export" class="btn irreversible" title="Writes files to the library. Asks for confirmation.">Export approved</button>
-        <button id="btn-guide" class="btn ghost" data-shortcut="g" title="Walk through the review workflow">Guide</button>
-        <a class="btn ghost" href="/docs" target="_blank" rel="noopener">API docs</a>
-        <a class="btn ghost" id="link-download-windows" href="/api/downloads/windows" download>Download for Windows</a>
-        <span id="user-chip" class="muted user-chip"></span>
-        <button id="btn-logout" class="btn ghost" type="button">Sign out</button>
       </div>
     </div>
   </header>
+
+  <!-- Status strip: always visible. Each item is text + a mark + colour, never colour alone. -->
+  <div class="status-strip" id="status-strip" aria-label="System status">
+    <button id="btn-health" class="strip-item strip-button health-button" aria-expanded="false" aria-controls="health-panel" title="Open the system health panel">
+      <span class="dot"></span><span id="health-text">System</span>
+    </button>
+    <span id="scanner-status" class="strip-item scanner-status" hidden></span>
+    <span id="folders-status" class="strip-item folders-status" data-status="idle"><span class="dot"></span><span class="strip-text">Folders</span></span>
+    <span id="immich-status" class="strip-item immich-status" hidden><span class="dot"></span><span class="strip-text">Immich on</span></span>
+    <span id="jobs-status" class="strip-item jobs-status" data-status="idle"><span class="dot"></span><span class="strip-text">No jobs running</span></span>
+    <span class="spacer"></span>
+    <button id="btn-learning" class="strip-item strip-button learning-button" aria-expanded="false" aria-controls="learning-panel">
+      Learning <span id="learning-count" class="count-badge mono">0</span>
+    </button>
+    <button id="btn-immich" class="strip-item strip-button" aria-expanded="false" aria-controls="immich-panel">Immich</button>
+    <button id="btn-guide" class="strip-item strip-button" data-shortcut="g" title="Walk through the review workflow">Guide</button>
+  </div>
 
   <section id="health-panel" class="drawer health-panel" hidden>
     <div class="card">
@@ -140,11 +143,12 @@
       </form>
       <div class="card immich-check-card">
         <div class="panel-head">
-          <h3>Duplicate check</h3>
+          <h3>Indexed in Immich?</h3>
           <span id="immich-connection" class="muted mono"></span>
           <span class="spacer"></span>
           <button type="button" class="btn" id="btn-immich-check">Check Immich for duplicates</button>
         </div>
+        <p class="muted immich-check-note">A warning only: a match is shown on the scan, nothing is decided for you.</p>
         <div id="immich-progress-wrap" class="immich-progress" hidden>
           <progress id="immich-progress" max="1" value="0" aria-label="Photos read from Immich"></progress>
           <span id="immich-progress-text" class="mono"></span>
@@ -156,17 +160,74 @@
 
   <div class="layout">
     <aside class="queue card" aria-label="Scan queue">
-      <div class="queue-head"><h2>Queue</h2><span id="queue-count" class="muted mono"></span></div>
+      <div class="queue-head">
+        <h2>Queue</h2>
+        <span id="queue-count" class="muted mono"></span>
+        <span class="spacer"></span>
+        <label class="toggle queue-filter" title="Only scans that need a decision: no date, possible rescan, no back, blank back">
+          <input type="checkbox" id="exceptions-only"> Exceptions only
+        </label>
+      </div>
       <ul id="scan-list-skeleton" class="queue-list queue-skeleton" aria-hidden="true"></ul>
       <ul id="scan-list" class="queue-list"></ul>
-      <p id="empty-list" class="empty" hidden>No scans here.<br>Load photos in the scanner and click <em>Scan feeder</em>,<br>or put scan files in the inbox and click <em>Ingest inbox</em>.</p>
+      <p id="empty-list" class="empty" hidden>No scans here.</p>
     </aside>
 
     <main id="detail" class="detail">
-      <div class="placeholder card" id="placeholder">
-        <p class="placeholder-title">Select a scan to review.</p>
-        <p class="muted">Every action has a button; the letters shown on buttons are keyboard shortcuts.</p>
-      </div>
+      <!-- The stage: one area that changes with what is happening. Shown whenever no scan is open. -->
+      <section id="stage" class="stage card" data-stage="idle" aria-live="polite">
+        <p class="stage-kicker" id="stage-kicker">Idle</p>
+        <h1 id="stage-title">Load photos into the feeder.</h1>
+        <p id="stage-body" class="stage-body muted"></p>
+        <ol id="stage-steps" class="stage-steps" hidden></ol>
+        <div id="stage-detail" class="stage-detail"></div>
+        <p id="stage-code" class="stage-code" hidden><span class="muted">Code</span> <code id="stage-code-text"></code> <button type="button" class="btn small ghost" id="btn-stage-copy">Copy</button></p>
+        <div class="stage-actions">
+          <button type="button" class="btn primary" id="stage-primary">Scan feeder</button>
+          <button type="button" class="btn ghost" id="stage-secondary" hidden></button>
+        </div>
+      </section>
+
+      <!-- Batch-level label: set once for the whole stack, then fix only the exceptions. -->
+      <section id="batch-card" class="card batch-card" hidden>
+        <div class="panel-head">
+          <h2>Batch</h2>
+          <span id="batch-name" class="mono batch-name"></span>
+          <span id="batch-summary" class="muted batch-summary"></span>
+          <span class="spacer"></span>
+          <button type="button" class="btn small" id="btn-batch-toggle" aria-expanded="false" aria-controls="batch-form">Label whole batch</button>
+        </div>
+        <form id="batch-form" class="form batch-form" autocomplete="off" hidden>
+          <p class="muted batch-hint">Fills what is still empty on every scan in this batch that is still to review. Approved scans are never changed.</p>
+          <div class="grid2">
+            <div class="field">
+              <label for="batch-date">Date <span class="muted">(as written)</span></label>
+              <input id="batch-date" type="text" placeholder="Summer 1979">
+              <div id="batch-date-preview" class="date-preview"></div>
+            </div>
+            <div class="field">
+              <label for="batch-audience">Who may see this batch</label>
+              <select id="batch-audience">
+                <option value="private">Private (default)</option>
+                <option value="family">Family</option>
+              </select>
+            </div>
+          </div>
+          <div class="grid2">
+            <div class="field"><label for="batch-places">Places</label><input id="batch-places" type="text" placeholder="comma-separated"></div>
+            <div class="field"><label for="batch-events">Events</label><input id="batch-events" type="text" placeholder="comma-separated"></div>
+            <div class="field"><label for="batch-tags">Tags <span class="muted">(use / for hierarchy)</span></label><input id="batch-tags" type="text" placeholder="comma-separated"></div>
+            <div class="field"><label for="batch-box">Box label</label><input id="batch-box" type="text" placeholder="Box 3, shoebox, album 1"></div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="batch-replace"> Replace values the scans already have</label>
+          <div class="form-actions">
+            <span id="batch-state" class="muted"></span>
+            <span class="spacer"></span>
+            <button type="button" class="btn ghost" id="btn-batch-cancel">Close</button>
+            <button type="submit" class="btn primary" id="btn-batch-apply">Apply to batch</button>
+          </div>
+        </form>
+      </section>
 
       <section id="editor" hidden>
         <div class="editor-head card">
@@ -255,13 +316,17 @@
             <p class="autocorrect-note" data-for="description" hidden></p>
           </div>
 
-          <p id="derive-hint" class="muted derive-hint" hidden>People, places and events are suggested from the description. Dashed chips are suggestions: they become yours when you edit the field or approve. Click a “+” chip to add it.</p>
-          <div class="grid2">
-            <div class="field"><label>People</label><div class="chips-input" data-field="people"></div></div>
+          <p id="derive-hint" class="muted derive-hint" hidden>Places, events and people are suggested from the description. Dashed chips are suggestions: they become yours when you edit the field or approve. Click a “+” chip to add it.</p>
+          <div class="grid2" id="main-fields">
             <div class="field"><label>Places</label><div class="chips-input" data-field="places"></div></div>
             <div class="field"><label>Events</label><div class="chips-input" data-field="events"></div></div>
             <div class="field"><label>Tags <span class="muted">(use / for hierarchy)</span></label><div class="chips-input" data-field="tags"></div></div>
           </div>
+          <!-- People are off the main path: Immich groups faces after import, naming a cluster once is cheaper than typing per scan. -->
+          <details class="more-fields" id="more-fields">
+            <summary>People <span class="muted">(optional: Immich groups faces after import)</span></summary>
+            <div class="field"><label>People</label><div class="chips-input" data-field="people"></div></div>
+          </details>
 
           <div class="form-actions">
             <button type="button" class="btn danger" id="btn-reject" data-shortcut="x">Reject</button>
@@ -279,6 +344,14 @@
     </main>
   </div>
 
+  <footer class="utility-bar">
+    <a class="utility-link" href="/docs" target="_blank" rel="noopener">API docs</a>
+    <a class="utility-link" id="link-download-windows" href="/api/downloads/windows" download>Download for Windows</a>
+    <span class="spacer"></span>
+    <span id="user-chip" class="muted user-chip"></span>
+    <button id="btn-logout" class="btn small ghost" type="button">Sign out</button>
+  </footer>
+
   <dialog id="confirm-dialog" class="confirm-dialog" aria-labelledby="confirm-title">
     <form method="dialog" class="card">
       <h2 id="confirm-title"></h2>
@@ -295,6 +368,7 @@
   <div id="toast" class="toast" hidden role="status" aria-live="polite"></div>
   <script src="/static/vendor/driver/driver.js"></script>
   <script src="/static/app.js"></script>
+  <script src="/static/stage.js"></script>
   <script src="/static/tour.js"></script>
 </body>
 </html>

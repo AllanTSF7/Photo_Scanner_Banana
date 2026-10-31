@@ -31,18 +31,26 @@ Your original scans are never changed. They stay in the archive folder even if y
 
 | You need | Where |
 |---|---|
-| The review page | `http://<server>:8000` (local test on the laptop: <http://localhost:8000>) |
+| The app | On the scanning PC: double-click **PhotoScanner** (the scanner icon). It opens in its own window with no sign-in; closing the window stops it. On a shared server: `http://<server>:8000` in a browser, with a sign-in |
 | The inbox folder | NAS share `photo_vault/inbox` (local test: `C:\Users\TSF2\Banana_Test\inbox`) |
 | Epson FF-680W | network address `192.168.16.178`, powered on and on the network |
 
-The top bar shows **System OK** with a green dot when everything the app needs is working. An amber dot ("N warnings")
-means it works but something is degraded; a red dot ("N problems") means something is broken.
-Click it to see every component (database, folders, ExifTool, scanner, …) with details. **Recheck** tests again.
-
-The top bar of the review page also shows the scanner:
+The **status strip** under the top bar is always visible and says, in words, how things are:
+- **System OK** with a green dot when everything the app needs is working. A hollow dot ("N warnings")
+  means it works but something is degraded; a red dot ("N problems") means something is broken.
+  Click it to see every component (database, folders, ExifTool, scanner, …) with details. **Recheck** tests again.
 - **Scanner online** (green dot): ready. The **Scan feeder** button is enabled.
-- **Scanner offline** (red dot): the app can't reach the scanner. Check that it's powered on and on Wi-Fi.
-- **Scanning, N pages** (pulsing yellow dot): a scan is running.
+  **Scanner offline** (red dot): the app can't reach the scanner. Check that it's powered on and on Wi-Fi.
+  **Scanning, N photos** / **Processing N photos** (violet dot): a scan is running.
+- **Folders OK**, or **Folder problem** when the inbox, archive, library or data folder is missing or not writable.
+- **Immich on** only appears once Immich is enabled.
+- **No jobs running**, or which job is running (scanning, Immich check).
+
+The big area on the right is the **stage**. It changes with what is happening and always offers one main button:
+**Load photos into the feeder** when idle (with the last batches and an **Open** button for each), the step list while
+scanning, **N approved scans ready to export** once the review queue is empty, **Exported N scans** with where they
+went, or **Needs attention** when something went wrong - what happened, what happened to your scans, what to do,
+and a small code to quote when asking for help. There is always a next step; nothing dead-ends.
 
 The app scans directly from the scanner. You don't need Epson ScanSmart.
 (Putting scan files into the inbox folder and clicking **Ingest inbox** still works as an alternative.)
@@ -67,7 +75,7 @@ and dropped later, so duplex is always on.
    - **Add to review queue** (usual): photos go straight into **To review** when the scan finishes.
    - **Leave in inbox**: files are only saved into the inbox folder. Click **Ingest inbox** when you want to review them.
    The page remembers your choice.
-4. Click **Scan feeder**. The top bar shows **Scanning, N photos**, then **Processing N photos**.
+4. Click **Scan feeder** (in the top bar, or the big button on the stage). The status strip shows **Scanning, N photos**, then **Processing N photos**, and the stage shows which step is running.
 5. When the feeder is empty you see a message like "Scanned 10 photo(s), 20 page(s). Ingested 10 scan(s)"
    (or "…20 file(s) left in the inbox"). If it stops at "feeder capped at 36, scan again for more," load the
    rest and click **Scan feeder** again - nothing from the first batch is lost.
@@ -137,7 +145,7 @@ Fixes only count when you **approve** the scan; the message then says how many c
 After that, the same misreading is fixed automatically on later scans (shown as *auto-fixed*), and names you keep
 removing stop being suggested. Nothing you haven't approved is ever used, and nothing leaves this computer.
 
-The **Learning** button in the top bar shows how much the app has learned. **Threshold proposals** appear there once
+The **Learning** button in the status strip shows how much the app has learned. **Threshold proposals** appear there once
 there's enough evidence (for example, when to call a back "blank"). They change nothing until you press **Apply**, and
 **Revert** undoes them.
 
@@ -224,7 +232,7 @@ An optional, separate check: "have I already scanned and imported this photo int
 turn it on, and it only ever **reads** from Immich - it never uploads, edits, stacks, or triggers a library scan
 there.
 
-**Turning it on:** open the **Immich** button in the top bar, fill in your Immich server URL, an API key
+**Turning it on:** open the **Immich** button in the status strip, fill in your Immich server URL, an API key
 (*Immich → Account Settings → API Keys*), then tick **Enabled** and **Save**. **Library ID** is optional: leave it blank
 to compare against every photo the key can see, or enter an External Library's ID to limit the check to that one library.
 Only photos are compared, never videos. The first run reads every photo's thumbnail (roughly 80,000 photos can take

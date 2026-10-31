@@ -12,11 +12,15 @@ datas = [
     (str(ROOT / "vendor" / "exiftool_win64"), "tools/exiftool"),
 ]
 binaries = []
-hiddenimports = ["banana.web.api", "banana_core", "banana.scanner.twain_scan", "banana.scanner.discover"]
+hiddenimports = [
+    "banana.web.api", "banana_core", "banana.scanner.twain_scan", "banana.scanner.discover",
+    # pywebview picks its Windows backend (WinForms host + Edge WebView2) at runtime, by string.
+    "webview.platforms.winforms", "webview.platforms.edgechromium", "clr_loader", "pythonnet",
+]
 
-# These three ship their own data (ONNX models, spaCy pipeline data, native extension DLLs) that plain
-# import-analysis would miss.
-for pkg in ("rapidocr_onnxruntime", "en_core_web_sm", "onnxruntime", "twain", "zeroconf"):
+# These ship their own data (ONNX models, spaCy pipeline data, native extension DLLs, WebView2 loader) that
+# plain import-analysis would miss.
+for pkg in ("rapidocr_onnxruntime", "en_core_web_sm", "onnxruntime", "twain", "zeroconf", "webview"):
     d, b, h = collect_all(pkg)
     datas += d
     binaries += b
@@ -40,7 +44,7 @@ exe = EXE(
     exclude_binaries=True,
     name="PhotoScanner",
     console=False,
-    icon=None,
+    icon=str(ROOT / "banana" / "web" / "static" / "icon.ico"),  # scripts/make_icon.py builds it from scripts/icon-source.png
 )
 coll = COLLECT(
     exe, a.binaries, a.datas,

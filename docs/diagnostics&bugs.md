@@ -323,9 +323,9 @@ faces, favorites, albums and Immich-side edits on the old asset are lost, and th
 
 ## 5. Known limitations
 
-- **Not yet in this version:** handwriting reading (TrOCR), AI duplicate detection (DINOv3), watermark detection, Immich stacks/albums, automatic Immich scan, duplicate resolver screen, bulk edit.
+- **Not yet in this version:** handwriting reading (TrOCR), AI duplicate detection (DINOv3), watermark detection, Immich stacks/albums, automatic Immich scan, duplicate resolver screen, export as a background job, cancelling a running scan. (Batch-level labelling - "bulk edit" - shipped 2026-10-31 as the **Label whole batch** card.)
 - **Backs appear as separate photos in Immich** until stacking is implemented.
-- **Unknown dates** get no EXIF date, so Immich places them at the file time (the export day).
+- **Unknown dates** get no EXIF date, so Immich places them at the file time (the export day). The UI keeps them visible: a "no date" count on the summary and batch card, and the **Exceptions only** queue filter.
 - **People are tags, not Immich People.**
 - **Date parser is English-only.** Numeric dates use US order.
 - **Limited database migrations.** New columns are added automatically; renamed or removed columns aren't. Keep backups of the database and the archive.

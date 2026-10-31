@@ -29,3 +29,11 @@ api_key = ""
 library_id = ""
 # Path of `paths.sorted` inside the Immich container (NOT the /volume1/... NAS path).
 import_path_prefix = "/mnt/photo_vault/sorted"
+
+[auth]
+# Host headers the app answers to; anything else is refused (blocks DNS rebinding). Add the server's
+# Tailscale name/IP when sharing. required = false switches sign-in off entirely: only for a single-computer
+# install bound to 127.0.0.1 (the packaged desktop build does this by itself).
+allowed_hosts = ["127.0.0.1", "localhost", "::1"]
+required = true
+setup_page = false

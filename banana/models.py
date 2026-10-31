@@ -27,6 +27,9 @@ class Batch(SQLModel, table=True):
     id: int | None = Field(default=None, primary_key=True)
     name: str = Field(unique=True, index=True)
     box_label: str | None = None
+    # Privacy tier, decided per batch and never by filename heuristics: everything is private until a person
+    # promotes it. Recorded here so the export manifest can carry it; nothing is moved automatically.
+    audience: str = "private"  # private | family
     created_at: datetime = Field(default_factory=utcnow)
 
 
