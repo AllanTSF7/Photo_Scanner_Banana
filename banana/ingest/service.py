@@ -24,6 +24,7 @@ from banana.analysis.date_parse import parse_best
 from banana.analysis.ocr import orientation
 from banana.analysis.entities import Entities, extract
 from banana.config import Settings
+from banana.immich import dedup as immich_dedup
 from banana.ingest.pairing import pair_files
 from banana.models import Batch, Scan, ScanStatus
 
@@ -278,7 +279,8 @@ def analyze_scan(
         if back:
             corrections.suggest(scan, "crop_back", scan.back_crop, produced["crop"])
 
-    value = core.dhash(imaging.analysis_gray(front, imaging.Edit(_box(scan.front_crop), 0), 512))
+    front_gray = imaging.analysis_gray(front, imaging.Edit(_box(scan.front_crop), 0), 512)
+    value = core.dhash(front_gray)
     scan.dhash_hex = f"{value:016x}"
     if back:
         gray = imaging.analysis_gray(back, imaging.Edit(_box(scan.back_crop), 0), 1024)
@@ -303,6 +305,9 @@ def analyze_scan(
             distance = d
             break
     corrections.suggest(scan, "duplicate", scan.duplicate_group_id, produced["duplicate"], distance=distance)
+    # Same comparison against the Immich library cached by the last check (no network): a photo that is already
+    # in Immich is flagged "in Immich?" as it comes in, not only when the operator next runs the full check.
+    immich_dedup.suggest_cached_match(session, scan, front_gray, settings)
     if settings.analysis.read_text and back and scan.back_type != "blank":
         read_back_text(scan, settings, known=known_entities(session, exclude_id=scan.id),
                        learned=dictionary.cached_build(session))

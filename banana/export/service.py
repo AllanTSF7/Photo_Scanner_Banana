@@ -10,7 +10,7 @@ from sqlmodel import Session, select
 from banana.analysis.date_parse import parse_best
 from banana.dates import PhotoDate, Precision
 from banana.export.exporter import Exporter, ExportRequest, ExportResult
-from banana.export.metadata import PhotoMetadata
+from banana.export.metadata import PhotoMetadata, text_problems
 from banana.imaging import Edit
 from banana.models import Batch, Export, Scan, ScanStatus, utcnow
 
@@ -86,14 +86,34 @@ def scan_edit(scan: Scan, side: str) -> Edit:
     return Edit(tuple(crop) if crop else None, rotation or 0)
 
 
-def export_scan(session: Session, scan: Scan, exporter: Exporter) -> Export:
-    batch = session.get(Batch, scan.batch_id)
-    meta = PhotoMetadata(
+def metadata_for(scan: Scan, batch: Batch | None) -> PhotoMetadata:
+    return PhotoMetadata(
         date=scan.photo_date(),
         description=scan.description or "",
         people=list(scan.people), places=list(scan.places), events=list(scan.events), tags=list(scan.tags),
-        box_label=batch.box_label,
+        box_label=batch.box_label if batch else None,
     )
+
+
+def export_blockers(scan: Scan) -> list[str]:
+    """Why this scan must not be exported as it stands, in the operator's words: text that can't go into the
+    photo's metadata (which field, which character, what to type instead), or a duplicate flag the operator set
+    themselves. Checked when the scan is approved - while it is on screen and can be fixed - and again at export
+    for scans approved before this existed, so the answer is never an ExifTool error after the fact."""
+    problems = text_problems({
+        "description": scan.description or "", "people": list(scan.people), "places": list(scan.places),
+        "events": list(scan.events), "tags": list(scan.tags),
+    })
+    if scan.operator_duplicate:
+        problems.append("You flagged this as a duplicate: reject it, or press Unflag duplicate first")
+    if scan.operator_immich_duplicate:
+        problems.append("You flagged this as already in Immich: reject it, or press Unflag as in Immich first")
+    return problems
+
+
+def export_scan(session: Session, scan: Scan, exporter: Exporter) -> Export:
+    batch = session.get(Batch, scan.batch_id)
+    meta = metadata_for(scan, batch)
     back = Path(scan.back_path) if scan.back_path and scan.keep_back else None
     record = session.exec(select(Export).where(Export.scan_id == scan.id)).first()
     previous = None

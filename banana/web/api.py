@@ -26,7 +26,7 @@ from banana.analysis import autocorrect
 from banana.analysis.date_parse import find_dates
 from banana.config import load_settings
 from banana.dates import PhotoDate
-from banana.export.service import ManualDate
+from banana.export.service import ManualDate, export_blockers
 from banana.ingest import thumbs
 from banana.export.service import scan_edit
 from banana.imaging import Edit
@@ -37,6 +37,7 @@ from banana.ingest.service import (
     analyze_scan, extract_for_scan, known_entities, read_back_text, record_entity_suggestions,
     release_from_duplicate_group,
 )
+from banana.immich import dedup as immich_dedup
 from banana.immich import settings as immich_settings
 from banana.ingest.runner import IngestRunner
 from banana.immich.client import build_client
@@ -384,8 +385,10 @@ class ImmichSettingsUpdate(BaseModel):
 
 @app.get("/api/immich/settings", tags=["immich"])
 def get_immich_settings(session: Session = Depends(get_session)) -> dict:
-    """Never returns the raw API key - just whether one is set and its last 4 characters."""
-    return immich_settings.get_masked(session, settings)
+    """Never returns the raw API key - just whether one is set and its last 4 characters. `library_cache` says how
+    many library photos are cached locally and when they were last read - that cache is what new scans are
+    compared against as they are ingested."""
+    return {**immich_settings.get_masked(session, settings), "library_cache": immich_dedup.cache_summary(session)}
 
 
 @app.patch("/api/immich/settings", tags=["immich"])
@@ -470,9 +473,12 @@ def scan_progress() -> dict:
 
 @app.get("/api/scans", tags=["scans"])
 def list_scans(
-    status: str | None = None, limit: int = Query(500, le=5000), session: Session = Depends(get_session)
+    status: str | None = None, limit: int = Query(500, le=5000), offset: int = Query(0, ge=0),
+    session: Session = Depends(get_session),
 ) -> list[dict]:
-    query = select(Scan).order_by(Scan.id).limit(limit)
+    """A page of scans ordered by id. The UI reads pages of `limit` until a short one arrives, so the queue shows
+    every scan (it used to stop at the first 500 while the tab count said more)."""
+    query = select(Scan).order_by(Scan.id).offset(offset).limit(limit)
     if status:
         query = query.where(Scan.status == status)
     page = list(session.exec(query))
@@ -544,6 +550,13 @@ def update_scan(scan_id: int, body: ScanUpdate, session: Session = Depends(get_s
             setattr(scan, name, value)
     if scan.back_path is None:
         scan.keep_back = False
+    if body.status == ScanStatus.APPROVED.value:
+        # Approval means "ready to export": refuse now, naming the field and character to change (or the duplicate
+        # flag to resolve), rather than letting export fail later with an ExifTool message. Nothing is saved.
+        blockers = export_blockers(scan)
+        if blockers:
+            code = 409 if any(b.startswith("You flagged") for b in blockers) else 422
+            raise HTTPException(code, "Not approved. " + " ".join(blockers))
     entities_recorded = all(k in (scan.suggestions or {}) for k in ("people", "places", "events"))
     if body.description is not None or (body.status == ScanStatus.APPROVED.value and not entities_recorded):
         _record_entities_from_description(session, scan)
@@ -854,10 +867,17 @@ def export_approved(session: Session = Depends(get_session)) -> dict:
 
     scans = list(session.exec(select(Scan).where(Scan.status == ScanStatus.APPROVED.value)))
     exported, errors = [], []
-    if scans:
+    ready = []
+    for scan in scans:  # approved before the approval-time check existed, or flagged as a duplicate since
+        blockers = export_blockers(scan)
+        if blockers:
+            errors.append({"id": scan.id, "error": " ".join(blockers)})
+        else:
+            ready.append(scan)
+    if ready:
         with ExifToolWriter(settings.exiftool.path) as writer:
             exporter = Exporter(settings.paths.sorted, writer)
-            for scan in scans:
+            for scan in ready:
                 try:
                     record = export_scan(session, scan, exporter)
                     exported.append({"id": scan.id, "front": record.front_rel, "back": record.back_rel})

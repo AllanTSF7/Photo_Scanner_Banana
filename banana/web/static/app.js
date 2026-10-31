@@ -322,8 +322,38 @@ function showListSkeleton(show) {
 }
 
 let listLoads = 0;
+const listPageSize = () => window.LIST_PAGE || 500; // the server's page; tests shrink it to exercise paging
+
+function listItem(s, i) {
+  const li = document.createElement("li");
+  li.dataset.id = s.id;
+  li.tabIndex = 0;
+  li.style.setProperty("--i", i);
+  li.className = s.id === state.selectedId ? "selected" : "";
+  li.innerHTML = `
+    <img loading="lazy" src="/api/scans/${s.id}/image/front?size=160&v=${encodeURIComponent(s.updated_at)}" alt="">
+    <div>
+      <div class="title">#${String(s.id).padStart(6, "0")}</div>
+      <div class="sub">
+        <span>${s.date.precision === "unknown" ? "no date" : escapeHtml(s.date.label)}</span>
+        ${state.status ? "" : `<span class="chip status ${s.status}">${statusLabel(s.status)}</span>`}
+        ${s.duplicate_group_id || s.operator_duplicate ? `<span class="chip warn">dup?</span>` : ""}
+        ${s.immich_duplicate_asset_id || s.operator_immich_duplicate ? `<span class="chip warn">in Immich?</span>` : ""}
+        ${s.back_type === "content" ? `<span class="chip">back text</span>` : ""}
+      </div>
+    </div>`;
+  li.onclick = () => selectScan(s.id);
+  li.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectScan(s.id); } };
+  return li;
+}
+
+function showQueueCount() {
+  $("queue-count").textContent = `${state.scans.length} scan${state.scans.length === 1 ? "" : "s"}`;
+}
+
 async function loadList() {
-  const url = "/api/scans" + (state.status ? `?status=${state.status}` : "");
+  const size = listPageSize();
+  const url = `/api/scans?limit=${size}` + (state.status ? `&status=${state.status}` : "");
   const load = ++listLoads;
   const slow = setTimeout(() => { if (load === listLoads && !$("scan-list").children.length) showListSkeleton(true); }, 120);
   try {
@@ -332,33 +362,27 @@ async function loadList() {
     clearTimeout(slow);
     if (load === listLoads) showListSkeleton(false);
   }
-  $("queue-count").textContent = `${state.scans.length} scan${state.scans.length === 1 ? "" : "s"}`;
-  $("scan-list").replaceChildren(
-    ...state.scans.map((s, i) => {
-      const li = document.createElement("li");
-      li.dataset.id = s.id;
-      li.tabIndex = 0;
-      li.style.setProperty("--i", i);
-      li.className = s.id === state.selectedId ? "selected" : "";
-      li.innerHTML = `
-        <img loading="lazy" src="/api/scans/${s.id}/image/front?size=160&v=${encodeURIComponent(s.updated_at)}" alt="">
-        <div>
-          <div class="title">#${String(s.id).padStart(6, "0")}</div>
-          <div class="sub">
-            <span>${s.date.precision === "unknown" ? "no date" : escapeHtml(s.date.label)}</span>
-            ${state.status ? "" : `<span class="chip status ${s.status}">${statusLabel(s.status)}</span>`}
-            ${s.duplicate_group_id || s.operator_duplicate ? `<span class="chip warn">dup?</span>` : ""}
-            ${s.immich_duplicate_asset_id || s.operator_immich_duplicate ? `<span class="chip warn">in Immich?</span>` : ""}
-            ${s.back_type === "content" ? `<span class="chip">back text</span>` : ""}
-          </div>
-        </div>`;
-      li.onclick = () => selectScan(s.id);
-      li.onkeydown = (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); selectScan(s.id); } };
-      return li;
-    }),
-  );
+  showQueueCount();
+  $("scan-list").replaceChildren(...state.scans.map(listItem));
   $("empty-list").hidden = state.scans.length > 0;
   updateNavButtons();
+  // The server answers one page at a time; the rest of the queue is appended as it arrives, so the list is never
+  // silently cut at the first page (it once stopped at scan 500 while the tab count said 600). Not awaited: the
+  // first page is on screen and usable while the others load.
+  if (state.scans.length === size) loadMorePages(url, size, load).catch((e) => toast(e.message, true));
+}
+
+async function loadMorePages(url, size, load) {
+  let page;
+  do {
+    page = await api("GET", `${url}&offset=${state.scans.length}`);
+    if (load !== listLoads) return; // a newer load has replaced the list
+    const start = state.scans.length;
+    state.scans = state.scans.concat(page);
+    $("scan-list").append(...page.map((s, i) => listItem(s, start + i)));
+    showQueueCount();
+    updateNavButtons();
+  } while (page.length === size);
 }
 
 async function refresh() {
@@ -707,20 +731,67 @@ function confirmSuggestions() {
   });
 }
 
+/** Approve pressed on a scan marked as a possible duplicate (by the app's rescan check, the Immich check, or the
+    operator's own flag): ask first, offering to reject it instead. Approving means exporting, and 11 pairs of
+    the same picture reached the library before this prompt existed. Resolves to {choice, flags}: `flags` are
+    the operator flags a "reject as duplicate" sets, so the decision is recorded like Flag duplicate would. */
+async function confirmDuplicate() {
+  const scan = state.current;
+  if (!scan || isCommitted(scan)) return { choice: "approve", flags: {} };
+  const reasons = [];
+  const flags = {};
+  if (scan.operator_duplicate) reasons.push("You flagged this as a duplicate.");
+  else if (scan.duplicate_group_id) {
+    let other = null;
+    try { other = await api("GET", `/api/scans/${scan.duplicate_group_id}`); } catch { /* deleted since */ }
+    const where = !other ? "" : other.status === "exported" ? " (already in the library)" : ` (${statusLabel(other.status).toLowerCase()})`;
+    reasons.push(`It looks like a rescan of #${String(scan.duplicate_group_id).padStart(6, "0")}${where}.`);
+    flags.operator_duplicate = true;
+  }
+  if (scan.operator_immich_duplicate) reasons.push("You flagged this as already in Immich.");
+  else if (scan.immich_duplicate_asset_id) {
+    const d = scan.suggestions?.immich_duplicate?.value?.distance;
+    reasons.push(`The Immich check found a matching photo in your library${Number.isInteger(d) ? ` (differs by ${d} of 64)` : ""}.`);
+    flags.operator_immich_duplicate = true;
+  }
+  if (!reasons.length) return { choice: "approve", flags };
+  const flagged = scan.operator_duplicate || scan.operator_immich_duplicate;
+  $("duplicate-body").textContent = reasons.join(" ") + (flagged
+    ? " Reject it, or clear the flag before approving."
+    : " Approving it would put the same picture in the library twice.");
+  $("duplicate-approve").hidden = flagged; // the server refuses to approve a flagged duplicate anyway
+  const choice = await new Promise((resolve) => {
+    const dialog = $("duplicate-dialog");
+    dialog.returnValue = "";
+    dialog.onclose = () => resolve(dialog.returnValue || "cancel");
+    dialog.showModal();
+    $("duplicate-reject").focus();
+  });
+  return { choice, flags };
+}
+
 async function applyStatus(status) {
   await selecting;
   if (state.selectedId == null) return;
   const currentIndex = state.scans.findIndex((s) => s.id === state.selectedId);
+  let extra = {};
   if (status === "approved") {
-    const choice = await confirmSuggestions();
-    if (choice === "cancel") return;
-    for (const f of CHIP_FIELDS) {
-      if (choice === "accept") chips[f].acceptPending();
-      else if (choice === "leave") chips[f].leaveOutPending();
+    const duplicate = await confirmDuplicate();
+    if (duplicate.choice === "cancel") return;
+    if (duplicate.choice === "reject") {
+      status = "rejected";
+      extra = duplicate.flags;
+    } else {
+      const choice = await confirmSuggestions();
+      if (choice === "cancel") return;
+      for (const f of CHIP_FIELDS) {
+        if (choice === "accept") chips[f].acceptPending();
+        else if (choice === "leave") chips[f].leaveOutPending();
+      }
     }
   }
   try {
-    const scan = await save({ status });
+    const scan = await save({ status, ...extra });
     const recorded = scan.corrections_recorded;
     toast(`#${scan.id} ${statusLabel(status).toLowerCase()}${recorded ? ` · ${recorded} corrections recorded for learning` : ""}`);
     if (recorded) loadLearningCount();
@@ -1429,6 +1500,19 @@ async function loadImmichSettings() {
 function renderImmichConnection(s) {
   $("immich-connection").textContent = s.enabled ? "Enabled" : "Disabled - turn on Enabled and save to check";
   $("btn-immich-check").disabled = !s.enabled;
+  renderImmichCache(s.library_cache);
+}
+
+// New scans are compared against the library copy the last check cached, so say how big and how old it is.
+function renderImmichCache(cache) {
+  const el = $("immich-cache");
+  if (!cache || !cache.assets) {
+    el.textContent = "No library photos cached yet: new scans are compared with Immich once the check has run.";
+    return;
+  }
+  const when = cache.refreshed_at ? new Date(cache.refreshed_at).toLocaleDateString() : "";
+  el.textContent = `${cache.assets.toLocaleString()} library photos cached${when ? ` (last read ${when})` : ""}. `
+    + "New scans are compared against them as they come in; run the check to read photos added to Immich since.";
 }
 
 $("immich-settings-form").addEventListener("submit", async (e) => {

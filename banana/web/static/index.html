@@ -166,6 +166,7 @@
           <span id="immich-progress-text" class="mono"></span>
         </div>
         <p id="immich-check-message" class="muted"></p>
+        <p id="immich-cache" class="muted"></p>
       </div>
     </div>
   </section>
@@ -318,6 +319,19 @@
         <span class="spacer"></span>
         <button value="leave" class="btn" id="suggestions-leave">Leave them out</button>
         <button value="accept" class="btn primary" id="suggestions-accept">Accept all</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="duplicate-dialog" class="confirm-dialog" aria-labelledby="duplicate-title">
+    <form method="dialog" class="card">
+      <h2 id="duplicate-title">Possible duplicate</h2>
+      <p id="duplicate-body"></p>
+      <div class="form-actions">
+        <button value="cancel" class="btn ghost" id="duplicate-cancel">Back to editing</button>
+        <span class="spacer"></span>
+        <button value="reject" class="btn" id="duplicate-reject">Reject as duplicate</button>
+        <button value="approve" class="btn primary" id="duplicate-approve">Approve anyway</button>
       </div>
     </form>
   </dialog>

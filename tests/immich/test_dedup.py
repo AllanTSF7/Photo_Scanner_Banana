@@ -202,3 +202,40 @@ def test_controller_refuses_to_start_when_disabled(env, server):
     with pytest.raises(RuntimeError):
         controller.start()
     assert server.requests == []
+
+
+def test_a_new_scan_is_compared_with_the_cached_library_as_it_is_analysed(env, tmp_path):
+    """The ingest-time half of the check: no network, just the hashes the last full check cached. Until this,
+    a scan was only compared when the operator next ran the full check."""
+    from banana import imaging
+    from banana.ingest import service
+
+    settings, engine = env
+    photo = _photo(5)
+    path = tmp_path / "scan.jpg"
+    path.write_bytes(photo)
+    in_library = core.dhash(imaging.analysis_gray_bytes(photo, 512))
+    with db.session(engine) as session:
+        session.add(ImmichAssetHash(asset_id="lib-5", checksum="c5", dhash_hex=f"{in_library:016x}"))
+        session.add(ImmichAssetHash(asset_id="lib-6", checksum="c6", dhash_hex=f"{in_library ^ 0xFFFFFFFF:016x}"))
+        session.commit()
+        scan = Scan(batch_id=1, source_key="s5", front_path=str(path))
+        service.analyze_scan(session, scan, settings, detect_crops=False)
+        assert scan.immich_duplicate_asset_id == "lib-5"
+        suggestion = scan.suggestions["immich_duplicate"]
+        assert suggestion["value"]["asset_id"] == "lib-5"
+        assert suggestion["value"]["distance"] <= settings.analysis.dhash_max_distance
+        assert suggestion["producer"].startswith("immich-dhash@")
+
+
+def test_analysis_leaves_the_immich_flag_alone_while_nothing_is_cached(env, tmp_path):
+    from banana.ingest import service
+
+    settings, engine = env
+    path = tmp_path / "scan.jpg"
+    path.write_bytes(_photo(2))
+    with db.session(engine) as session:
+        scan = Scan(batch_id=1, source_key="s2", front_path=str(path), immich_duplicate_asset_id="old")
+        service.analyze_scan(session, scan, settings, detect_crops=False)
+        assert scan.immich_duplicate_asset_id == "old"
+        assert "immich_duplicate" not in (scan.suggestions or {})

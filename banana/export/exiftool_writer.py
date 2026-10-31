@@ -24,6 +24,16 @@ _READ_KEYS = {
 }
 
 
+# What each written tag is called when a verification problem is reported to the operator.
+_FIELD_OF_TAG = {
+    "XMP-xmp:CreatorTool": "creator tool",
+    "EXIF:DateTimeOriginal": "date", "EXIF:CreateDate": "date", "XMP-exif:DateTimeOriginal": "date",
+    "XMP-xmp:CreateDate": "date",
+    "EXIF:ImageDescription": "description", "XMP-dc:Description": "description",
+    "XMP-dc:Subject": "tags", "XMP-digiKam:TagsList": "tags", "XMP-lr:HierarchicalSubject": "tags",
+}
+
+
 class MetadataVerificationError(RuntimeError):
     pass
 
@@ -52,6 +62,26 @@ def _as_list(value: object) -> list[str]:
     if isinstance(value, list):
         return [str(v) for v in value]
     return [str(value)]
+
+
+def _read_list(value: object) -> list[object]:
+    """What ExifTool read back, untyped: a list tag with one entry comes back as a scalar."""
+    if value is None:
+        return []
+    return value if isinstance(value, list) else [value]
+
+
+def _same(want: str, got: object) -> bool:
+    """ExifTool's JSON output types values: a tag "1.50" reads back as 1.5, "007" as 7 and "true" as True. The
+    file holds the text that was written - that is not a failed write, so compare by value, not by spelling."""
+    if isinstance(got, bool):
+        return want.strip().lower() == str(got).lower()
+    if isinstance(got, (int, float)):
+        try:
+            return float(want) == float(got)
+        except ValueError:
+            return False
+    return str(got) == want
 
 
 class ExifToolWriter:
@@ -92,9 +122,10 @@ class ExifToolWriter:
         for tag, expected in meta.expected_values(is_back=is_back).items():
             if xmp_only and not tag.startswith("XMP-"):
                 continue
-            got = _as_list(actual.get(_READ_KEYS[tag]))
+            got = _read_list(actual.get(_READ_KEYS[tag]))
             want = _as_list(expected)
-            if got != want:
-                problems.append(f"{tag}: expected {want!r}, got {got!r}")
+            if len(got) != len(want) or not all(_same(w, g) for w, g in zip(want, got)):
+                shown = [str(g) for g in got]
+                problems.append(f"{_FIELD_OF_TAG.get(tag, tag)} ({tag}): expected {want!r}, read back {shown!r}")
         if problems:
-            raise MetadataVerificationError(f"{path}: " + "; ".join(problems))
+            raise MetadataVerificationError(f"{path.name}: " + "; ".join(problems))

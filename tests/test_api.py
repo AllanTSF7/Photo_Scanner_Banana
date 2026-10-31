@@ -475,6 +475,7 @@ def test_immich_settings_never_echo_the_raw_api_key(client):
     assert c.get("/api/immich/settings").json() == {
         "enabled": False, "url": "", "library_id": "", "import_path_prefix": "/mnt/photo_vault/sorted",
         "api_key_set": False, "api_key_last4": None,
+        "library_cache": {"assets": 0, "refreshed_at": None},  # nothing read from Immich yet
     }
 
     saved = c.patch("/api/immich/settings", json={
@@ -757,3 +758,65 @@ def test_sign_in_is_required_by_default(tmp_path, monkeypatch):
     app = _local_app(tmp_path, monkeypatch, "")
     with TestClient(app, base_url="http://127.0.0.1:8420", client=("127.0.0.1", 50000)) as here:
         assert here.get("/api/scans").status_code == 401
+
+
+# ---------------------------------------------------------------- paging, approval gate, duplicate gate
+
+
+def _ingested(c) -> dict:
+    c.post("/api/ingest")
+    return {s["source_key"]: s for s in c.get("/api/scans").json()}
+
+
+def test_scans_are_listed_in_pages_with_limit_and_offset(client):
+    """The UI walks pages until a short one; before `offset` existed the list stopped at the first 500 (B-44)."""
+    c, _ = client
+    everything = [s["id"] for s in _ingested(c).values()]
+    assert len(everything) == 7
+    first = [s["id"] for s in c.get("/api/scans?limit=3").json()]
+    second = [s["id"] for s in c.get("/api/scans?limit=3&offset=3").json()]
+    third = [s["id"] for s in c.get("/api/scans?limit=3&offset=6").json()]
+    assert sorted(first + second + third) == sorted(everything) and len(third) == 1  # the short page ends the walk
+    assert c.get("/api/scans?limit=3&offset=7").json() == []
+
+
+def test_approval_names_the_character_that_cannot_be_written(client):
+    c, _ = client
+    sid = _ingested(c)["Attic3_0002"]["id"]
+    refused = c.patch(f"/api/scans/{sid}", json={
+        "description": "Bellville、Texas", "people": ["Tom·Jane"], "status": "approved",
+    })
+    assert refused.status_code == 422
+    detail = refused.json()["detail"]
+    assert detail.startswith("Not approved. ")
+    assert 'Description: "、" (ideographic comma): use "," instead' in detail
+    assert 'People: "·" (middle dot): use "-" instead' in detail
+    after = c.get(f"/api/scans/{sid}").json()
+    assert after["status"] == "needs_review" and after["people"] == []  # nothing of the refused save went in
+    fixed = c.patch(f"/api/scans/{sid}", json={
+        "description": "Bellville, Texas", "people": ["Tom-Jane"], "status": "approved",
+    })
+    assert fixed.status_code == 200 and fixed.json()["status"] == "approved"
+
+
+def test_a_flagged_duplicate_is_refused_at_approval_and_at_export(client):
+    c, _ = client
+    scans = _ingested(c)
+    rescan = scans["Attic3_0007"]
+    assert rescan["duplicate_group_id"] == scans["Attic3_0001"]["id"]
+    sid = rescan["id"]
+    assert c.patch(f"/api/scans/{sid}", json={"operator_duplicate": True}).status_code == 200
+    refused = c.patch(f"/api/scans/{sid}", json={"status": "approved"})
+    assert refused.status_code == 409 and "press Unflag duplicate first" in refused.json()["detail"]
+    assert c.get(f"/api/scans/{sid}").json()["status"] == "needs_review"
+
+    # Approved first, flagged afterwards (or approved before this check existed): export reports it instead of
+    # writing a second copy of the picture. Decided before ExifTool is even started, so no ExifTool is needed.
+    assert c.patch(f"/api/scans/{sid}", json={"operator_duplicate": False, "status": "approved"}).status_code == 200
+    assert c.patch(f"/api/scans/{sid}", json={"operator_immich_duplicate": True}).status_code == 200
+    result = c.post("/api/export").json()
+    assert result["exported"] == []
+    assert result["errors"] == [
+        {"id": sid, "error": "You flagged this as already in Immich: reject it, or press Unflag as in Immich first"},
+    ]
+    assert c.get(f"/api/scans/{sid}").json()["status"] == "approved"

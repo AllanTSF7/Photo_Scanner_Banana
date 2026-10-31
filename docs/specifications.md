@@ -616,6 +616,23 @@ via `GET /api/immich/check/status`. `GET /api/immich/status` is a separate, chea
 disabled, `OK` with the asset count when reachable, `FAIL` with a plain-language reason (`HTTP {code} - check the
 API key/library id`, or `Could not connect: ...`) otherwise.
 
+**Ingest-time comparison [implemented]** (`dedup.suggest_cached_match`, called from `analyze_scan`): every scan
+is compared, at all four rotations, against the `immich_asset_hash` cache as it is ingested or re-analysed - no
+network call, just the hashes the last full check stored (kept in memory, reloaded when the cache's row count or
+newest `fetched_at` changes). Same threshold, same `immich_duplicate` suggestion as the full check; a no-op while
+the cache is empty. Before this, a scan was only compared when the operator next ran the full check, which on the
+live install happened once. `GET /api/immich/settings` reports `library_cache` so the panel can say how many
+library photos are cached and when they were read.
+
+**Approval as the export gate [implemented]** (`banana/export/service.py::export_blockers`, `metadata.text_problems`):
+approving a scan is refused (422/409, see Â§8) when its text holds a character that can't go into the photo's
+metadata - anything outside printable ASCII, accented Latin letters and common typographic punctuation, plus `/`
+or `|` inside a name (tag-level separators) - or when the operator's own duplicate flag is set. The message names
+the field, the character (by Unicode name) and the replacement, so the fix happens while the scan is on screen
+instead of surfacing as an ExifTool verification error at export. `POST /api/export` runs the same check for scans
+approved earlier. The UI asks before approving a scan the app marked `dup?` or `in Immich?` (`#duplicate-dialog`:
+Reject as duplicate sets the matching operator flag, Approve anyway proceeds).
+
 **Genuine unknowns, pending a real server:** exact `search/metadata` pagination field names; exact
 `assets/{id}/thumbnail` size query param; whether `bulk-upload-check` actually caps items per request; the exact
 asset-count field name in `assets/statistics`'s response.
@@ -637,16 +654,16 @@ asset-count field name in `assets/statistics`'s response.
 | POST | `/api/scans/{id}/read-text` | OCR the back again; fills empty description/date |
 | GET | `/api/scanner/scan` | `{state: idle\|scanning\|done\|failed, destination, run_name, started_at, finished_at, pages, files[], message, ingest}` |
 | GET | `/api/summary` | scan counts per status, native flag, configured paths |
-| GET | `/api/scans?status=&limit=` | list (default limit 500, max 5000), ordered by id |
+| GET | `/api/scans?status=&limit=&offset=` | one page (default limit 500, max 5000), ordered by id; the UI walks pages until a short one, so the queue is never cut at the first page **[implemented]** |
 | GET | `/api/scans/{id}` | one scan (includes `version`) |
 | PATCH | `/api/scans/{id}` | change only the fields sent; with `version`, 409 `{code: "conflict", scan}` if it was saved elsewhere since **[implemented]** |
-| PATCH | `/api/scans/{id}` | update (see below) |
+| PATCH | `/api/scans/{id}` | update (see below). `status: "approved"` is refused when the scan could not be exported as it stands (`export_blockers`): 422 naming the field, the character and what to type instead (`text_problems`), or 409 when the operator's own duplicate flag is set. Nothing of a refused save is kept **[implemented]** |
 | DELETE | `/api/scans/{id}` | delete a rejected scan's files + record; 409 unless rejected, unexported, and no correction history |
 | GET | `/api/scans/{id}/image/{front\|back}?size=` | cached JPEG preview, 64–4096 px (default 1600); 404 if missing |
 | GET | `/api/dates/parse?text=` | date candidates, best first |
 | POST | `/api/ingest` | run inbox ingest → `{batch, created[], skipped[], unmatched[], possible_duplicates[]}` |
-| POST | `/api/export` | export every `approved` scan, **synchronously** → `{exported[{id,front,back}], errors[{id,error}]}` |
-| GET | `/api/immich/settings` | `{enabled, url, library_id, import_path_prefix, api_key_set, api_key_last4}` - never the raw key |
+| POST | `/api/export` | export every `approved` scan, **synchronously** → `{exported[{id,front,back}], errors[{id,error}]}`; a scan with `export_blockers` (unwritable text, operator duplicate flag) is listed in `errors` in the operator's words and never handed to ExifTool |
+| GET | `/api/immich/settings` | `{enabled, url, library_id, import_path_prefix, api_key_set, api_key_last4, library_cache: {assets, refreshed_at}}` - never the raw key |
 | PATCH | `/api/immich/settings` | body: any of `enabled, url, library_id, import_path_prefix, api_key`; omit `api_key` to keep it, `""` to clear it |
 | GET | `/api/immich/status` | live probe, zero network calls when disabled → `{enabled, connected, asset_count, error}` |
 | POST | `/api/immich/check` | start the read-only duplicate check in the background; 409 if disabled or already running |

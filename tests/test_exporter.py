@@ -9,7 +9,7 @@ import pytest
 from PIL import Image
 
 from banana.dates import PhotoDate, Precision
-from banana.export.exiftool_writer import ExifToolWriter
+from banana.export.exiftool_writer import ExifToolWriter, MetadataVerificationError
 from banana.export.exporter import Exporter, ExportRequest
 from banana.export.metadata import PhotoMetadata
 
@@ -88,3 +88,25 @@ def test_text_outside_ascii_round_trips(tmp_path, writer):
     assert sidecar["XMP-dc:Description"] == text
     assert "People/Zoë Müller" in sidecar["XMP-digiKam:TagsList"]
     assert writer.read(root / result.front_rel)["IFD0:ImageDescription"] == text
+
+
+def test_values_that_read_back_typed_still_verify(tmp_path, writer):
+    """ExifTool's JSON output turns "1.50" into 1.5, "007" into 7 and "true" into true. The file holds the text
+    that was written, so that is not a failed write."""
+    front = _jpeg(tmp_path / "Box3_0009.jpg", 9)
+    meta = PhotoMetadata(date=PhotoDate(Precision.DAY, 1984, 12, 25), description="1.50", people=["007", "true"],
+                         tags=["1e5"])
+    result = Exporter(tmp_path / "sorted", writer).export(ExportRequest(9, "Box", front, None, meta))
+    sidecar = writer.read(tmp_path / "sorted" / f"{result.front_rel}.xmp")
+    assert "People/007" in sidecar["XMP-digiKam:TagsList"]
+
+
+def test_verification_failures_name_the_field(tmp_path, writer):
+    front = _jpeg(tmp_path / "x.jpg", 3)
+    date = PhotoDate(Precision.DAY, 1984, 12, 25)
+    writer.write_image(front, PhotoMetadata(date=date, description="written"), is_back=False)
+    with pytest.raises(MetadataVerificationError) as err:
+        writer.verify(front, PhotoMetadata(date=date, description="expected"), is_back=False, xmp_only=False)
+    assert str(err.value).startswith(
+        "x.jpg: description (EXIF:ImageDescription): expected ['expected'], read back ['written']"
+    )

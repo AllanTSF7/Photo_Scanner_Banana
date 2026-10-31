@@ -154,7 +154,10 @@ there's enough evidence (for example, when to call a back "blank"). They change 
 - **Re-detect crop** when the photo isn't trimmed right. The chip next to "Front" says **cropped** or **full page**.
 
 **Then decide:**
-- **Approve** (<kbd>A</kbd>): the photo is ready to export. The next photo opens.
+- **Approve** (<kbd>A</kbd>): the photo is ready to export. The next photo opens. If the text holds a
+  character that can't be written into the photo (OCR sometimes reads "、" or "·" off a label), the photo stays
+  where it is and the message names the field, the character and what to type instead - fix it and approve again.
+  If the photo is marked `dup?` or `in Immich?`, you're asked first (see section 5).
 - **Reject** (<kbd>X</kbd>): the photo won't be exported. Use this for rescans and failed or blurry scans.
   The original stays in the archive - rejecting never deletes anything.
 - **Save** (<kbd>Ctrl</kbd>+<kbd>S</kbd>): keep your edits and decide later.
@@ -170,7 +173,9 @@ nothing to keep.
 
 ### Step 4: Export
 Click **Export approved**. Approved photos move to the **Exported** tab, and the form shows where
-each file went (for example `1984/1984-12-25/SCAN_000001_A.jpg`).
+each file went (for example `1984/1984-12-25/SCAN_000001_A.jpg`). A photo that can't be exported stays in
+**Approved** and the message says why in plain words - which field to fix, or that you flagged it as a
+duplicate - so nothing stray reaches the library.
 
 ### Step 5: Refresh Immich
 In Immich go to *Administration → External Libraries → Scan*. (This will become automatic later.)
@@ -214,6 +219,10 @@ photo *looks similar* to an earlier one. It may be a rescan, a reprint, or just 
 - **Real duplicate:** reject the worse copy and approve the better one.
 - **Not a duplicate:** ignore the warning and review normally.
 
+Pressing **Approve** on a `dup?` (or `in Immich?`) scan asks first: **Reject as duplicate**, **Approve anyway**,
+or **Back to editing**. A scan you flagged yourself with **Flag duplicate** can't be approved or exported until
+you reject it or press **Unflag duplicate**; the message says which.
+
 The check is simple for now and gives some false alarms, especially for photos with similar layouts.
 A smarter comparison is planned.
 
@@ -241,6 +250,10 @@ it works) and does two things:
 
 A match shows as an **in Immich?** chip on that scan, dashed until you confirm or clear it with the flag button
 next to it - the same kept/removed/added pattern as **Flag duplicate**.
+
+**Between checks:** every new scan is compared, as it comes in, with the copy of your library that the last check
+read - no connection to Immich is needed for that. The line under the button says how many library photos are
+cached and when they were read. Photos added to Immich since then aren't known until you run the check again.
 
 **What it can't do:** it can't tell you a photo is a duplicate before you've exported it (export changes the
 file, so only the exported copy can ever match byte-for-byte), and it can't ask Immich "have you seen anything

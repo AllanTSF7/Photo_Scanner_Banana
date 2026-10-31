@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 import numpy as np
+from sqlalchemy import func
 from sqlmodel import Session, select
 
 from banana import core, db, imaging
@@ -109,17 +110,22 @@ def refresh_asset_hashes(
     return stats
 
 
-def _scan_fingerprints(scan: Scan) -> list[int]:
-    """The scan's dHash at 0/90/180/270 degrees. The stored `dhash_hex` is taken from the unrotated crop (it has
-    to stay that way for local rescan detection), but Immich's copy of a photo is upright, and a scan fed
+def fingerprints(gray: np.ndarray) -> list[int]:
+    """dHash of an analysis image at 0/90/180/270 degrees. Immich's copy of a photo is upright, and a scan fed
     through the feeder sideways or upside down matches it only when turned the same way."""
+    return [core.dhash(np.ascontiguousarray(np.rot90(gray, k))) for k in range(4)]
+
+
+def _scan_fingerprints(scan: Scan) -> list[int]:
+    """The scan's fingerprints at all four rotations. The stored `dhash_hex` is taken from the unrotated crop (it
+    has to stay that way for local rescan detection) and is the fallback when the file can't be read."""
     stored = int(scan.dhash_hex, 16)
     try:
         crop = tuple(scan.front_crop) if scan.front_crop else None
         gray = imaging.analysis_gray(Path(scan.front_path), imaging.Edit(crop, 0), 512)
     except Exception:  # noqa: BLE001 - file gone or unreadable: fall back to the stored, unrotated fingerprint
         return [stored]
-    return [stored] + [core.dhash(np.ascontiguousarray(np.rot90(gray, k))) for k in (1, 2, 3)]
+    return [stored] + fingerprints(gray)[1:]
 
 
 def _distances(asset_hashes: np.ndarray, value: int) -> np.ndarray:
@@ -128,27 +134,80 @@ def _distances(asset_hashes: np.ndarray, value: int) -> np.ndarray:
     return np.unpackbits(xor.view(np.uint8).reshape(-1, 8), axis=1).sum(axis=1)
 
 
+def cache_summary(session: Session) -> dict:
+    """How much of the Immich library is cached locally and when it was last read: `{assets, refreshed_at}`.
+    Shown in the Immich panel so the operator knows how old the library that new scans are compared against is."""
+    count, newest = session.exec(select(func.count(), func.max(ImmichAssetHash.fetched_at))).one()
+    return {"assets": int(count or 0), "refreshed_at": newest}
+
+
+_pool_lock = threading.Lock()
+_pool: tuple[tuple, list[str], np.ndarray] | None = None  # (cache key, asset ids, hashes)
+
+
+def _asset_pool(session: Session) -> tuple[list[str], np.ndarray]:
+    """Every cached asset's (id, dHash), held in memory until the cache changes: about 80k rows is too many to
+    read back from SQLite for each photo an ingest analyses. The key changes whenever a refresh adds or re-hashes
+    an asset (`refresh_asset_hashes` stamps `fetched_at` on every row it touches)."""
+    global _pool
+    summary = cache_summary(session)
+    key = (summary["assets"], str(summary["refreshed_at"]))
+    with _pool_lock:
+        if _pool is not None and _pool[0] == key:
+            return _pool[1], _pool[2]
+    rows = list(session.exec(
+        select(ImmichAssetHash.asset_id, ImmichAssetHash.dhash_hex).where(ImmichAssetHash.dhash_hex.is_not(None))
+    ))
+    ids = [asset_id for asset_id, _ in rows]
+    hashes = np.array([int(dhash_hex, 16) for _, dhash_hex in rows], dtype=np.uint64)
+    with _pool_lock:
+        _pool = (key, ids, hashes)
+    return ids, hashes
+
+
+def best_cached_match(session: Session, values: list[int], max_distance: int) -> tuple[str, int] | None:
+    """The closest cached Immich asset to any of these fingerprints within `max_distance`: (asset id, distance),
+    or None. Reads only the local cache - never the network."""
+    asset_ids, asset_hashes = _asset_pool(session)
+    if not asset_ids:
+        return None
+    best: tuple[str, int] | None = None
+    for value in values:
+        distances = _distances(asset_hashes, value)
+        i = int(distances.argmin())
+        d = int(distances[i])
+        if d <= max_distance and (best is None or d < best[1]):
+            best = (asset_ids[i], d)
+    return best
+
+
+def suggest_cached_match(session: Session, scan: Scan, gray: np.ndarray, settings: Settings) -> bool:
+    """The ingest-time half of the Immich check: compare one scan (all four rotations) against the library hashes
+    already cached by the last "Check Immich for duplicates" run, with no network call. Without it a scan was only
+    compared when the operator started a full check - on the live install nothing scanned after the single run on
+    2026-10-09 had been compared at all. Records a suggestion only, like the full check, and does nothing (leaving
+    any earlier suggestion alone) while no library has been cached yet. Returns whether it matched."""
+    if not _asset_pool(session)[0]:
+        return False
+    match = best_cached_match(session, fingerprints(gray), settings.analysis.dhash_max_distance)
+    producer = corrections.producers(settings)["immich_duplicate"]
+    scan.immich_duplicate_asset_id = match[0] if match else None
+    corrections.suggest(scan, "immich_duplicate", {"asset_id": match[0], "distance": match[1]} if match else None, producer)
+    return match is not None
+
+
 def find_matches(session: Session, settings: Settings) -> MatchStats:
     """Compare every (non-rejected) scan's own dHash - at all four rotations - against the cached Immich asset
     hashes, with the same algorithm and threshold already used for local rescan detection
     (banana/ingest/service.py::analyze_scan), just against a different pool. Never auto-applied: only ever
     recorded as a suggestion."""
     stats = MatchStats()
-    hashes = list(session.exec(select(ImmichAssetHash).where(ImmichAssetHash.dhash_hex.is_not(None))))
-    if not hashes:
+    if not _asset_pool(session)[0]:
         return stats
-    asset_ids = [h.asset_id for h in hashes]
-    asset_hashes = np.array([int(h.dhash_hex, 16) for h in hashes], dtype=np.uint64)
     produced = corrections.producers(settings)["immich_duplicate"]
     scans = session.exec(select(Scan).where(Scan.dhash_hex.is_not(None), Scan.status != ScanStatus.REJECTED.value))
     for scan in scans:
-        best: tuple[str, int] | None = None
-        for value in _scan_fingerprints(scan):
-            distances = _distances(asset_hashes, value)
-            i = int(distances.argmin())
-            d = int(distances[i])
-            if d <= settings.analysis.dhash_max_distance and (best is None or d < best[1]):
-                best = (asset_ids[i], d)
+        best = best_cached_match(session, _scan_fingerprints(scan), settings.analysis.dhash_max_distance)
         if best is None:
             continue
         asset_id, distance = best

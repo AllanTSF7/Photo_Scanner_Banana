@@ -1615,3 +1615,75 @@ def test_approve_back_to_editing_keeps_everything_unsaved(page, server):
     expect(page.locator("#suggestions-dialog")).to_be_hidden()
     status = page.evaluate(f"async () => (await (await fetch('/api/scans/{sid}')).json()).status")
     assert status == "needs_review"
+
+
+# ---------------------------------------------------------------- queue paging, duplicate prompt, approval gate
+
+
+def test_the_queue_shows_every_scan_beyond_the_first_page(browser, server):
+    """The server answers one page at a time and the list keeps loading until a short page arrives. It used to
+    stop at the first 500 while the tab count said more (B-44); the page size is shrunk here to exercise it."""
+    context = signed_in(browser, server["base"])
+    pg = context.new_page()
+    pg.add_init_script("window.LIST_PAGE = 3")
+    pg.goto(server["base"] + "/")
+    ingest(pg)  # 7 scans: two full pages and a short one
+    expect(pg.locator("#queue-count")).to_have_text("7 scans")
+    ids = pg.evaluate("[...document.querySelectorAll('#scan-list li')].map((li) => li.dataset.id)")
+    assert len(ids) == len(set(ids)) == 7
+    pg.locator("#scan-list li").last.click()  # a scan from the last page is selectable like any other
+    expect(pg.locator("#scan-title")).to_have_text(f"Scan #{int(ids[-1]):06d}")
+    context.close()
+
+
+@pytest.mark.parametrize("choice,expected_status", [("reject", "rejected"), ("approve", "approved")])
+def test_approve_asks_before_a_possible_duplicate_at_400px(browser, server, choice, expected_status):
+    context = signed_in(browser, server["base"], viewport={"width": 400, "height": 800})
+    pg = context.new_page()
+    pg.goto(server["base"] + "/")
+    ingest(pg)
+    rescan = pg.evaluate(
+        "async () => (await (await fetch('/api/scans?status=needs_review')).json()).find((s) => s.duplicate_group_id)"
+    )
+    pg.locator(f'#scan-list li[data-id="{rescan["id"]}"]').click()
+    expect(pg.locator("#scan-dup")).to_be_visible()
+    pg.locator("#btn-approve").scroll_into_view_if_needed()
+    pg.click("#btn-approve")
+    expect(pg.locator("#duplicate-dialog")).to_be_visible()
+    expect(pg.locator("#duplicate-body")).to_contain_text(f"rescan of #{rescan['duplicate_group_id']:06d}")
+    assert no_horizontal_scroll(pg)
+    button = pg.locator(f"#duplicate-{choice}")
+    expect(button).to_be_enabled()
+    button.click()
+    expect(toast(pg)).to_contain_text(expected_status)
+    scan = pg.evaluate(f"async () => (await (await fetch('/api/scans/{rescan['id']}')).json())")
+    assert scan["status"] == expected_status
+    assert scan["operator_duplicate"] is (choice == "reject")  # rejecting as a duplicate records the decision
+    context.close()
+
+
+def test_approve_back_to_editing_from_the_duplicate_prompt_changes_nothing(page):
+    ingest(page)
+    rescan = page.evaluate(
+        "async () => (await (await fetch('/api/scans?status=needs_review')).json()).find((s) => s.duplicate_group_id)"
+    )
+    page.locator(f'#scan-list li[data-id="{rescan["id"]}"]').click()
+    page.click("#btn-approve")
+    page.click("#duplicate-cancel")
+    expect(page.locator("#duplicate-dialog")).to_be_hidden()
+    status = page.evaluate(f"async () => (await (await fetch('/api/scans/{rescan['id']}')).json()).status")
+    assert status == "needs_review"
+
+
+def test_approving_text_that_cannot_be_written_says_what_to_change(page):
+    ingest(page)
+    page.locator("#scan-list li").first.click()
+    box = page.locator('.chips-input[data-field="people"]')
+    box.click()
+    box.locator("input").fill("Tom·Jane")  # OCR-style stray character
+    box.locator("input").press("Enter")
+    expect(box.locator(".chip")).to_have_count(1)
+    page.click("#btn-approve")
+    expect(toast(page)).to_contain_text('People: "·" (middle dot): use "-" instead')
+    remaining = page.evaluate("async () => (await (await fetch('/api/scans?status=needs_review')).json()).length")
+    assert remaining == 7  # nothing was approved or saved
