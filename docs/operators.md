@@ -31,7 +31,7 @@ Your original scans are never changed. They stay in the archive folder even if y
 
 | You need | Where |
 |---|---|
-| The app | On the scanning PC: double-click **PhotoScanner** (the scanner icon). It opens in its own window with no sign-in; closing the window stops it. On a shared server: `http://<server>:8000` in a browser, with a sign-in |
+| The app | On the scanning PC: unzip the download anywhere and double-click **PhotoScanner** (the scanner icon). Nothing else to install: Python, ExifTool, the text reader and its models are all inside the folder. It opens in its own window with no sign-in; closing the window stops it. Only scanning needs Epson's own **Epson Scan 2** installed. On a shared server: `http://<server>:8000` in a browser, with a sign-in |
 | The inbox folder | NAS share `photo_vault/inbox` (local test: `C:\Users\TSF2\Banana_Test\inbox`) |
 | Epson FF-680W | network address `192.168.16.178`, powered on and on the network |
 

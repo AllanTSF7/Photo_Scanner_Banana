@@ -210,9 +210,24 @@ def test_native_window_is_skipped_without_pywebview_or_when_the_browser_is_force
     assert calls == []
 
 
+def test_native_window_is_skipped_without_the_webview2_runtime(tmp_path, monkeypatch):
+    """Without the runtime, pywebview would fail inside its own event loop (an error dialog, or nothing); the launcher
+    checks first and goes straight to the Edge/Chrome app window instead."""
+    mod = _reload_with_env(monkeypatch, tmp_path)
+    monkeypatch.delenv("PHOTOSCANNER_BROWSER", raising=False)
+    calls = []
+    fake = type("webview", (), {"create_window": lambda *a, **k: calls.append("create"), "start": lambda *a, **k: calls.append("start")})
+    monkeypatch.setitem(sys.modules, "webview", fake)
+    monkeypatch.setattr(mod, "_webview2_available", lambda: False)
+    assert mod._run_native_window("http://127.0.0.1:1/") is False
+    assert calls == []
+    assert isinstance(desktop._webview2_available(), bool)  # the real check answers on this machine
+
+
 def test_native_window_runs_pywebview_with_persistent_storage(tmp_path, monkeypatch):
     mod = _reload_with_env(monkeypatch, tmp_path)
     monkeypatch.delenv("PHOTOSCANNER_BROWSER", raising=False)
+    monkeypatch.setattr(mod, "_webview2_available", lambda: True)
     calls = []
     fake = type("webview", (), {"create_window": lambda *a, **k: calls.append(("create", a, k)),
                                 "start": lambda *a, **k: calls.append(("start", a, k))})
@@ -228,6 +243,7 @@ def test_native_window_runs_pywebview_with_persistent_storage(tmp_path, monkeypa
 
 def test_native_window_failure_falls_back_instead_of_crashing(tmp_path, monkeypatch):
     mod = _reload_with_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(mod, "_webview2_available", lambda: True)
     monkeypatch.delenv("PHOTOSCANNER_BROWSER", raising=False)
 
     def boom(*a, **k):

@@ -856,10 +856,17 @@ Benchmark on a 5400×3600 JPEG (Core Ultra 9 275HX, WSL2):
   bundled ExifTool, and the scanner address is refreshed by name. The app opens as **its own window**, not a
   browser tab: the server runs in a background thread and a native window (pywebview over Edge WebView2, 1440×960, min
   400×600, persistent storage so remembered choices survive relaunch) owns the main thread; closing the window ends the
-  app. Without pywebview/WebView2 it falls back to an Edge/Chrome `--app` window, then to the default browser
+  app. The WebView2 runtime is checked first (loader DLL, then registry); without it the app falls back to an Edge/Chrome
+  `--app` window, then to the default browser
   (`PHOTOSCANNER_BROWSER=1` forces the browser). Icon: the operator's scanner picture (`scripts/icon-source.png`);
   `scripts/make_icon.py` turns it into `static/icon.ico` (the exe, the window title bar and taskbar) and
   `static/icon.png` (favicon and brand mark).
+- **Self-contained:** the bundle carries Python, every library, the C++ core, the OCR models, the spaCy model, ExifTool
+  (with its own Perl), the fonts and the MSVC runtime DLLs; it imports nothing outside the folder except Windows
+  itself (verified by walking every binary's import table). The two things it relies on that are part of Windows
+  rather than the bundle: .NET Framework 4.x (WinForms host for the window) and the WebView2 runtime (Windows 11
+  inbox; Windows 10 via Windows Update), each with a fallback. The one true external install is Epson Scan 2,
+  which Epson licenses and which scanning needs; everything else works without it.
 
 ---
 

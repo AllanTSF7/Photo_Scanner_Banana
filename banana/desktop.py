@@ -248,6 +248,44 @@ def _claim_taskbar_identity() -> None:
         pass
 
 
+def _webview2_available() -> bool:
+    """Whether the Microsoft Edge WebView2 runtime is on this machine. It is part of Windows 11 and reaches
+    Windows 10 through Windows Update, but it is the one piece the bundle cannot carry, so it is checked rather
+    than assumed: asking the WebView2 loader that ships with pywebview is authoritative, the registry is the
+    fallback, and when neither can answer the native window is still attempted (pywebview then reports)."""
+    try:
+        import ctypes
+        import webview
+
+        loader = Path(webview.__file__).parent / "lib" / "runtimes" / "win-x64" / "native" / "WebView2Loader.dll"
+        if loader.exists():
+            dll = ctypes.WinDLL(str(loader))
+            version = ctypes.c_wchar_p()
+            result = dll.GetAvailableCoreWebView2BrowserVersionString(None, ctypes.byref(version))
+            found = result == 0 and bool(version.value)
+            if version.value:
+                ctypes.windll.ole32.CoTaskMemFree(version)
+            return found
+    except Exception:  # noqa: BLE001 - fall through to the registry
+        pass
+    try:
+        import winreg
+
+        client = r"Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}"
+        for root, key in ((winreg.HKEY_LOCAL_MACHINE, "SOFTWARE\\WOW6432Node\\" + client),
+                          (winreg.HKEY_LOCAL_MACHINE, "SOFTWARE\\" + client),
+                          (winreg.HKEY_CURRENT_USER, "Software\\" + client)):
+            try:
+                with winreg.OpenKey(root, key) as handle:
+                    if winreg.QueryValueEx(handle, "pv")[0] not in ("", "0.0.0.0"):
+                        return True
+            except OSError:
+                continue
+        return False
+    except Exception:  # noqa: BLE001 - not Windows, or no registry access: let pywebview try
+        return True
+
+
 def _run_native_window(url: str) -> bool:
     """Show the app in a native window and block until it is closed. Must run on the main thread (WebView2).
     Returns False, having shown nothing, when pywebview or the WebView2 runtime is unavailable, so the
@@ -257,6 +295,8 @@ def _run_native_window(url: str) -> bool:
     try:
         import webview
     except ImportError:
+        return False
+    if not _webview2_available():
         return False
     _claim_taskbar_identity()
     try:
